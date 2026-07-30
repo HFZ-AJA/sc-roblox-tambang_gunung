@@ -5131,6 +5131,9 @@ do
 		local sellUntil = 0
 		local lootBlocked = false
 		local statusText = "Idle"
+		local barrenCycles = 0
+		local barrenWarpClock = 0
+		local minedYSet = {}
 
 		local function toggleValue(name)
 			local store = Library and Library.Toggles
@@ -5371,6 +5374,8 @@ do
 			sellUntil = 0
 			heldPick = nil
 			statusText = "Idle"
+			barrenCycles = 0
+			table.clear(minedYSet)
 
 			Move.setFly(toggleValue("Fly"))
 			Move.setNoclip(toggleValue("Noclip"))
@@ -5554,9 +5559,18 @@ do
 					target = spot
 
 					if columnDry >= COLUMN_DRY then
+						local consumed = math.floor(spot.Y / 10) * 10
+						minedYSet[consumed] = true
 						target = nil
 						columnY = nil
 						columnDry = 0
+						-- Warp to a different area instead of re-picking same column
+						local ms = mountainSpot() or origin
+						local drift = ms + Vector3.new(math.random(-60, 60), math.random(20, 80), math.random(-60, 60))
+						teleportTo(drift)
+						statusText = "Column dry, moving..."
+						task.wait(0.3)
+						return
 					end
 				end
 			end
@@ -5569,15 +5583,43 @@ do
 				end
 
 				if not spot then
-					requestStream(origin)
+					barrenCycles += 1
 
-					if canSwing then
-						swingClock -= swingNeed
-						swing(root.Position - Vector3.new(0, DIG_REACH * 0.5, 0))
+					if barrenCycles >= 8 and not Net.busy() then
+						-- Teleport to mountain center instead of digging
+						local ms = mountainSpot()
+						if ms then
+							local warpPos = ms + Vector3.new(math.random(-80, 80), 50, math.random(-80, 80))
+							teleportTo(warpPos)
+							requestStream(warpPos)
+							barrenCycles = 0
+							statusText = "No surface, warping..."
+							task.wait(0.5)
+							return
+						end
 					end
 
-					statusText = "Loading terrain"
+					if barrenCycles >= 20 and not Net.busy() then
+						Library:Notify("Mountain depleted, hopping server", 3)
+						Net.hop()
+						stop()
+						return
+					end
+
+					requestStream(origin)
+					-- Don't swing at nothing — just glide to a different spot
+					local ms = mountainSpot() or origin
+					local drift = ms + Vector3.new(math.random(-60, 60), 30, math.random(-60, 60))
+					holdAt(CFrame.new(drift))
+					statusText = "Searching surface..."
 					return
+				end
+
+				barrenCycles = 0
+				-- Track mined Y to avoid re-mined columns
+				if columnY then
+					local yKey = math.floor(columnY / 10) * 10
+					minedYSet[yKey] = true
 				end
 
 				target = spot
@@ -5625,6 +5667,8 @@ do
 			sellUntil = 0
 			heldPick = nil
 			statusText = "Starting"
+			barrenCycles = 0
+			table.clear(minedYSet)
 
 			Move.setFly(false)
 			Move.setNoclip(true)
