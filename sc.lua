@@ -6796,10 +6796,162 @@ do
 				Callback = function(v) EXT.updateCheck = v end,
 			})
 		end
+
+		-- Auto Plant Runes GUI (Farming tab)
+		local rpBox = Tabs.farming:AddRightGroupbox("Auto Plant Runes", "zap")
+		rpBox:AddToggle("ExtAutoRunes", {
+			Text = "Auto Plant Runes from Backpack",
+			Default = false,
+			Callback = function(v) EXT.autoRunes = v end,
+		})
+		rpBox:AddLabel("Automatically finds runes in your backpack and plants them at the rune altar.", true)
+
 		pcall(v2Gui)
+
+		-- ===== AUTO PLANT RUNES =====
+		local PLANT_REMOTES = { "PlantRune", "ActivateRune", "PlaceRune", "EquipRune", "UseRune", "RuneAction" }
+		local plantRuneRemote
+		local plantClock = 0
+
+		local function findRuneAltar()
+			-- Look for rune altar/table in the player's plot
+			local data = LocalPlayer:FindFirstChild("PlayerData")
+			local plot = data and data:FindFirstChild("PlotData")
+			if plot then
+				for _, child in ipairs(plot:GetDescendants()) do
+					if child:IsA("BasePart") and (child.Name:find("RuneAltar", 1, true)
+						or child.Name:find("RuneTable", 1, true) or child.Name:find("RuneSlot", 1, true)
+						or child.Name:find("Altar", 1, true)) then
+						return child, child.Position
+					end
+				end
+			end
+			-- Try the player's plot in workspace
+			for _, child in ipairs(Workspace:GetDescendants()) do
+				if child:IsA("BasePart") and child.Name:find("RuneAltar", 1, true) then
+					return child, child.Position
+				end
+			end
+			-- Try known rune platform spot from mountain decorations
+			local deco = Workspace:FindFirstChild("MountainDecorations")
+			if deco then
+				local runeArea = deco:FindFirstChild("RuneArea") or deco:FindFirstChild("Runes")
+				if runeArea and runeArea:IsA("BasePart") then
+					return runeArea, runeArea.Position
+				end
+			end
+			return nil, nil
+		end
+
+		local function backpackRunes()
+			local runes = {}
+			local function scan(container)
+				if not container then return end
+				for _, item in ipairs(container:GetChildren()) do
+					if item:IsA("Tool") then
+						local rId = getAttr(item, "RuneId") or getAttr(item, "RuneName")
+						if rId or getAttr(item, "IsRune") == true or item.Name:find(" Rune", 1, true) then
+							runes[#runes + 1] = item
+						end
+					end
+				end
+			end
+			scan(LocalPlayer:FindFirstChildOfClass("Backpack"))
+			scan(LocalPlayer.Character)
+			return runes
+		end
+
+		local function alreadyActive(runeName)
+			if not runeName then return false end
+			return hasActiveRune(runeName:gsub(" Rune$", ""))
+		end
+
+		local function tryPlantRunes()
+			if not EXT.autoRunes then return end
+			local now = os.clock()
+			if now - plantClock < 5 then return end
+			plantClock = now
+
+			local runes = backpackRunes()
+			if #runes == 0 then return end
+
+			-- Check if any rune is not yet active
+			local toPlant
+			for _, r in ipairs(runes) do
+				local name = getAttr(r, "RuneName") or getAttr(r, "RuneId") or r.Name
+				if not alreadyActive(name) then
+					toPlant = r
+					break
+				end
+			end
+			if not toPlant then return end
+
+			-- Find remote
+			if not plantRuneRemote or not plantRuneRemote.Parent then
+				for _, n in ipairs(PLANT_REMOTES) do
+					local r = findRemote(n)
+					if r then plantRuneRemote = r; break end
+				end
+			end
+
+			-- Try equipping + activating the rune tool
+			local char = LocalPlayer.Character
+			local hum = char and char:FindFirstChildOfClass("Humanoid")
+			if hum then
+				pcall(function() hum:EquipTool(toPlant) end)
+				task.wait(0.2)
+				-- Fire any remote event on the tool
+				for _, child in ipairs(toPlant:GetDescendants()) do
+					if child:IsA("RemoteEvent") then
+						pcall(function() child:FireServer() end)
+					end
+				end
+				-- Fire click detectors on the tool
+				local cd = toPlant:FindFirstChildWhichIsA("ClickDetector")
+				if cd and typeof(fireclickdetector) == "function" then
+					pcall(function() fireclickdetector(cd, 0) end)
+				end
+			end
+
+			-- Try firing plant remote
+			if plantRuneRemote then
+				local name = getAttr(toPlant, "RuneName") or getAttr(toPlant, "RuneId") or toPlant.Name
+				pcall(function() plantRuneRemote:FireServer() end)
+				pcall(function() plantRuneRemote:FireServer(name) end)
+				pcall(function() plantRuneRemote:FireServer(toPlant) end)
+			end
+
+			-- Try TP to altar + activate prompt
+			local _, pos = findRuneAltar()
+			if pos then
+				local root = getRoot()
+				if root and (pos - root.Position).Magnitude > 30 then
+					teleportTo(pos)
+					task.wait(0.5)
+				end
+				-- Try to find and fire proximity prompt at altar
+				local altar = findRuneAltar()
+				if altar then
+					local prompt = altar:FindFirstChildOfClass("ProximityPrompt")
+					if prompt then
+						firePrompt(prompt)
+					end
+					-- Try any prompt descendant
+					for _, p in ipairs(altar:GetDescendants()) do
+						if p:IsA("ProximityPrompt") then
+							firePrompt(p)
+							break
+						end
+					end
+				end
+			end
+
+			Library:Notify(string.format("Planting rune: %s", runeTitle(toPlant)), 2)
+		end
 
 		-- ===== V2 Heartbeat =====
 		local v2Conn = RunService.Heartbeat:Connect(function(dt)
+			if EXT.autoRunes then tryPlantRunes() end
 			if EXT.autoBoost then tryAutoBoost() end
 			if EXT.rebirth then tryAutoRebirth() end
 			if EXT.autoTrade then tryAutoTrade() end
