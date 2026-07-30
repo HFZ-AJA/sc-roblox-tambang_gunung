@@ -5187,6 +5187,8 @@ do
 		local minedYSet = {}
 		local targetSwings = 0
 		local depletedCells = {}
+		local lastPickupTime = os.clock()
+		local crystalDrought = 0
 
 		local function toggleValue(name)
 			local store = Library and Library.Toggles
@@ -5429,6 +5431,8 @@ do
 			statusText = "Idle"
 			barrenCycles = 0
 			targetSwings = 0
+			crystalDrought = 0
+			lastPickupTime = os.clock()
 			table.clear(minedYSet)
 			table.clear(depletedCells)
 
@@ -5572,7 +5576,10 @@ do
 
 				if now - grabClock >= GRAB_GAP then
 					grabClock = now
-					grabCrystal(loot, crystalPrompt(loot))
+					if grabCrystal(loot, crystalPrompt(loot)) then
+						lastPickupTime = now
+						crystalDrought = 0
+					end
 				end
 
 				if lootHp and lootHp > 0 then
@@ -5710,6 +5717,21 @@ do
 				surfaceClock = now
 			end
 
+			-- Crystal drought detection: if mining 20s+ without pickup, spot is dry
+			crystalDrought = now - lastPickupTime
+			if crystalDrought >= 20 and targetSwings > 5 then
+				local cellKey = string.format("%d,%d", math.floor(target.X / 20), math.floor(target.Z / 20))
+				depletedCells[cellKey] = true
+				target = nil; columnY = nil; columnDry = 0; columnSwings = 0; targetSwings = 0; crystalDrought = 0
+				lastPickupTime = now
+				local ms = mountainSpot() or origin
+				local drift = ms + Vector3.new(math.random(-80, 80), 20, math.random(-80, 80))
+				teleportTo(drift)
+				statusText = "No crystals for 20s, moving..."
+				task.wait(0.3)
+				return
+			end
+
 			holdAt(CFrame.new(target + Vector3.new(0, DIG_LIFT, 0), target), target)
 
 			if canSwing then
@@ -5751,6 +5773,8 @@ do
 			statusText = "Starting"
 			barrenCycles = 0
 			targetSwings = 0
+			crystalDrought = 0
+			lastPickupTime = os.clock()
 			table.clear(minedYSet)
 			table.clear(depletedCells)
 
@@ -6875,16 +6899,8 @@ do
 			local runes = backpackRunes()
 			if #runes == 0 then return end
 
-			-- Check if any rune is not yet active
-			local toPlant
-			for _, r in ipairs(runes) do
-				local name = getAttr(r, "RuneName") or getAttr(r, "RuneId") or r.Name
-				if not alreadyActive(name) then
-					toPlant = r
-					break
-				end
-			end
-			if not toPlant then return end
+			-- Plant ALL runes from backpack (allow stacking)
+			local toPlant = runes[1]
 
 			-- Find remote
 			if not plantRuneRemote or not plantRuneRemote.Parent then
