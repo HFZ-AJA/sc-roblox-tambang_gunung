@@ -5748,24 +5748,15 @@ do
 			EXT.macroStep = 0
 		end
 
-		-- Collector Mode: systematic grid sweep picking crystals
+		-- Collector Mode: TP to crystals in radius & grab them
 		local function collectorStep()
 			if not EXT.collector then return end
-			local root = getRoot()
-			if not root then return end
-
 			local now = os.clock()
-			if now - EXT.collectorClock < 0.3 then return end
+			if now - EXT.collectorClock < 0.35 then return end
 			EXT.collectorClock = now
 
-			if EXT.collectorTarget and EXT.collectorTarget.Parent then
-				local dist = (EXT.collectorTarget.Position - root.Position).Magnitude
-				if dist > PICK.range then
-					teleportTo(EXT.collectorTarget)
-					return
-				end
-				if autoPickupActive then return end
-			end
+			local root = getRoot()
+			if not root then return end
 
 			local free = backpackFree()
 			if free <= 0 then
@@ -5773,41 +5764,60 @@ do
 				return
 			end
 
-			local best, bestDist
-			eachContainer(function(container)
-				for _, child in ipairs(container:GetChildren()) do
-					if isCrystal(child) and getAttr(child, "Collected") ~= true then
-						local v = crystalValue(child)
-						if meetsFilter(child, v) and not (EXT.nameFiltered and EXT.nameFiltered(child)) then
-							local w = crystalWeight(child)
-							if w <= free then
-								local d = (child.Position - root.Position).Magnitude
-								if d <= EXT.collectorRadius and (not best or d < bestDist) then
-									best = child; bestDist = d
-								end
-							end
-						end
+			-- If we have a target, either move to it or grab it
+			if EXT.collectorTarget and EXT.collectorTarget.Parent then
+				if getAttr(EXT.collectorTarget, "Collected") == true then
+					EXT.collectorTarget = nil
+				else
+					local dist = (EXT.collectorTarget.Position - root.Position).Magnitude
+					if dist > PICK.range + 1 then
+						requestStream(EXT.collectorTarget.Position)
+						teleportTo(EXT.collectorTarget)
+						return
 					end
+					-- Close enough — grab directly
+					grabCrystal(EXT.collectorTarget, crystalPrompt(EXT.collectorTarget))
+					EXT.collectorTarget = nil
+					return
+				end
+			end
+			EXT.collectorTarget = nil
+
+			-- Find best crystal in range (containers + tracked)
+			local best, bestDist
+			local function consider(inst)
+				if not inst or not inst.Parent then return end
+				if getAttr(inst, "Collected") == true then return end
+				local v = crystalValue(inst)
+				if not meetsFilter(inst, v) then return end
+				if EXT.nameFiltered and EXT.nameFiltered(inst) then return end
+				local w = crystalWeight(inst)
+				if not w or w > free then return end
+				local d = (inst.Position - root.Position).Magnitude
+				if d > EXT.collectorRadius then return end
+				if not best or d < bestDist then best = inst; bestDist = d end
+			end
+
+			eachContainer(function(c)
+				for _, child in ipairs(c:GetChildren()) do
+					if isCrystal(child) then consider(child) end
 				end
 			end)
+			for inst in pairs(registry) do consider(inst) end
 
 			if best then
 				EXT.collectorTarget = best
+				requestStream(best.Position)
 				teleportTo(best)
-				schedule(0.1, function()
-					if best.Parent then grabCrystal(best, crystalPrompt(best)) end
-				end)
 			else
-				-- Move to new area
-				local origin = EXT.collectorOrigin or root.Position
-				local spread = EXT.collectorRadius * 0.6
-				local newPos = origin + Vector3.new(
-					math.random(-spread, spread),
-					0,
-					math.random(-spread, spread)
+				-- Search new area
+				if not EXT.collectorOrigin then EXT.collectorOrigin = root.Position end
+				local spread = EXT.collectorRadius * 0.5
+				local newPos = EXT.collectorOrigin + Vector3.new(
+					math.random(-spread, spread), 0, math.random(-spread, spread)
 				)
 				teleportTo(newPos)
-				EXT.collectorOrigin = EXT.collectorOrigin or root.Position
+				requestStream(newPos)
 			end
 		end
 
