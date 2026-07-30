@@ -93,7 +93,11 @@ local function findRemote(name)
 end
 
 local SellRequest = findRemote("SellRequest")
+if not SellRequest then SellRequest = findRemote("SellAll") end
+if not SellRequest then SellRequest = findRemote("Sell") end
 local GoHome = findRemote("GoHome")
+if not GoHome then GoHome = findRemote("TeleportHome") end
+if not GoHome then GoHome = findRemote("Home") end
 local HoldComplete = findRemote("CrystalHoldComplete")
 local ToggleFavorite = findRemote("ToggleFavorite")
 
@@ -2294,6 +2298,27 @@ end
 
 local sellClock = 0
 
+local SELL_REMOTES = { "SellRequest", "SellAll", "Sell", "RequestSell", "SellItems" }
+local HOME_REMOTES = { "GoHome", "TeleportHome", "Home", "ReturnHome", "Spawn" }
+
+local function resolveHome()
+	if GoHome and GoHome.Parent then return GoHome end
+	for _, name in ipairs(HOME_REMOTES) do
+		local r = findRemote(name)
+		if r then GoHome = r; return r end
+	end
+	return nil
+end
+
+local function resolveSell()
+	if SellRequest and SellRequest.Parent then return SellRequest end
+	for _, name in ipairs(SELL_REMOTES) do
+		local r = findRemote(name)
+		if r then SellRequest = r; return r end
+	end
+	return nil
+end
+
 local function doSell()
 	local now = os.clock()
 	if now - sellClock < 1.5 then
@@ -2303,11 +2328,11 @@ local function doSell()
 	sellClock = now
 
 	unfavoriteAll()
-	fireRemote(GoHome, "sell")
+	fireRemote(resolveHome(), "sell")
 
 	schedule(0.6, function()
 		unfavoriteAll()
-		fireRemote(SellRequest, "all")
+		fireRemote(resolveSell(), "all")
 	end)
 
 	return true
@@ -5748,18 +5773,30 @@ do
 			end)
 		end
 
-		-- Auto Sell check (called from heartbeat)
+		-- Auto Sell check (called from heartbeat & collector)
 		local function tryAutoSell()
-			if not EXT.autoSell or not SellRequest then return false end
+			if not EXT.autoSell then return false end
 			local cap = backpackCapacity()
 			if cap == math.huge then return false end
-			local ratio = backpackWeight() / cap
-			if ratio >= (EXT.sellThreshold / 100) then
-				doSell()
-				EXT.sold += 1
-				return true
+			local used = backpackWeight()
+			local free = cap - used
+			local ratio = used / cap
+			-- Sell if above threshold OR completely full
+			if ratio >= (EXT.sellThreshold / 100) or free <= 0 then
+				if doSell() then
+					EXT.sold += 1
+					return true
+				end
 			end
 			return false
+		end
+
+		-- Called on every pickup failure due to full bag
+		local function tryAutoSellFull()
+			if not EXT.autoSell then return end
+			if backpackFree() <= 0 then
+				tryAutoSell()
+			end
 		end
 
 		-- Auto Upgrade: try to buy pickaxe/backpack upgrades
@@ -6192,12 +6229,17 @@ do
 
 		-- Hook into existing heartbeat for auto sell, collector, macro
 		local extConn = RunService.Heartbeat:Connect(function(deltaTime)
-			-- Auto sell periodic check
+			-- Auto sell: periodic check + instant when bag full
 			if EXT.autoSell then
-				EXT.sellClock += deltaTime
-				if EXT.sellClock >= EXT.sellInterval then
-					EXT.sellClock = 0
+				local free = backpackFree()
+				if free <= 0 then
 					tryAutoSell()
+				else
+					EXT.sellClock += deltaTime
+					if EXT.sellClock >= EXT.sellInterval then
+						EXT.sellClock = 0
+						tryAutoSell()
+					end
 				end
 			end
 
