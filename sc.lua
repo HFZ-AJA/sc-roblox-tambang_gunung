@@ -1,18 +1,9 @@
---[[
-	Mine a Mountain — Universe Script
-	Delta Executor Ready
-	Load: loadstring(game:HttpGet("https://raw.githubusercontent.com/HFZ-AJA/sc-roblox-tambang_gunung/refs/heads/main/sc.luau"))()
---]]
-
 local Players = game:GetService("Players")
 local CoreGui = game:GetService("CoreGui")
 local RunService = game:GetService("RunService")
 local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local UserInputService = game:GetService("UserInputService")
-local HttpService = game:GetService("HttpService")
-
-warn("Universe: Loading... (tekan RightControl untuk menu)")
 
 local LocalPlayer = Players.LocalPlayer
 local Mouse = LocalPlayer:GetMouse()
@@ -65,20 +56,11 @@ do
 end
 
 local function resolveGuiRoot()
-	-- Delta: gethui() mungkin gak ada, fallback ke CoreGui
 	local ok, hidden = pcall(function()
 		return gethui()
 	end)
 	if ok and typeof(hidden) == "Instance" then
 		return hidden
-	end
-
-	-- Delta safe: CoreGui game gak bisa destroy
-	ok = pcall(function()
-		return CoreGui and CoreGui.Parent ~= nil
-	end)
-	if ok then
-		return CoreGui
 	end
 
 	local playerGui = LocalPlayer:FindFirstChildOfClass("PlayerGui")
@@ -231,38 +213,9 @@ local PARSE_MULTIPLIERS = { k = 1e3, m = 1e6, b = 1e9, t = 1e12, qa = 1e15 }
 local CONTAINER_NAMES = { "DroppedCrystals", "Crystals" }
 
 local repo = "https://raw.githubusercontent.com/deividcomsono/Obsidian/main/"
-
-local function loadLib(path)
-	local url = repo .. path
-	local code
-	local ok, err = pcall(function()
-		code = game:HttpGet(url)
-	end)
-	if not ok or not code or code == "" then
-		ok, err = pcall(function()
-			code = HttpService:GetAsync(url)
-		end)
-	end
-	if not code or code == "" then
-		error(string.format("Gagal load %s (cek koneksi)", path))
-	end
-	return loadstring(code)()
-end
-
-local ok, Library = pcall(loadLib, "Library.lua")
-if not ok then
-	return warn("Universe: Library gagal dimuat —", tostring(Library))
-end
-
-local okSM, SaveManager = pcall(loadLib, "addons/SaveManager.lua")
-if not okSM then
-	SaveManager = { SetLibrary = function() end, IgnoreThemeSettings = function() end, SetFolder = function() end, SetIgnoreIndexes = function() end, LoadAutoloadConfig = function() end, RefreshConfigList = function() return {} end, GetAutoloadConfig = function() return "none" end }
-end
-
-local okTM, ThemeManager = pcall(loadLib, "addons/ThemeManager.lua")
-if not okTM then
-	ThemeManager = { SetLibrary = function() end, SetFolder = function() end, ApplyToTab = function() end }
-end
+local Library = loadstring(game:HttpGet(repo .. "Library.lua"))()
+local SaveManager = loadstring(game:HttpGet(repo .. "addons/SaveManager.lua"))()
+local ThemeManager = loadstring(game:HttpGet(repo .. "addons/ThemeManager.lua"))()
 
 Library.ForceCheckbox = false
 Library.ShowToggleFrameInKeybinds = true
@@ -274,8 +227,6 @@ local Window = Library:CreateWindow({
 	NotifySide = "Right",
 	ShowCustomCursor = false,
 })
-
-Library:Notify("Universe loaded — tekan RightControl untuk toggle menu", 5)
 
 local Tabs = {
 	crystals = Window:AddTab("Crystals", "gem"),
@@ -317,6 +268,20 @@ local lastReport = 0
 local tpState
 local sweepAccumulator = math.huge
 local statsDirty = true
+
+-- New Features state (bundled in table to avoid local var limits)
+local EXT = {
+	startTime = os.clock(),
+	earned = 0, picked = 0, sold = 0,
+	autoSell = false, sellThreshold = 85, sellInterval = 120, sellClock = 0,
+	autoUpgrade = false, upgradeClock = 0, upgradeRemote = nil,
+	webhook = "", webhookRare = true,
+	collector = false, collectorClock = 0, collectorTarget = nil, collectorRadius = 100,
+	macro = false, macroSeq = {}, macroIdx = 0, macroStep = 0, macroClock = 0, macroLoop = false, macroRecording = false,
+	radar = false, radarGui = nil, radarClock = 0,
+	whitelist = {}, blacklist = {}, whitelistMode = "off",
+	mutationPri = {}, mutationPriActive = false,
+}
 
 local statsAccumulator = 0
 local distanceAccumulator = math.huge
@@ -1709,11 +1674,27 @@ local function pickupCandidates(free, origin)
 		consider(inst)
 	end
 
+	-- Apply name filter
+	local filtered = {}
+	for _, e in ipairs(found) do
+		if not (EXT.nameFiltered and EXT.nameFiltered(e.inst)) then
+			filtered[#filtered + 1] = e
+		end
+	end
+	found = filtered
+
+	-- Apply mutation priority bonus to sort
+	for _, e in ipairs(found) do
+		e.mutBonus = (EXT.mutationBonus and EXT.mutationBonus(e.inst)) or 0
+	end
+
 	table.sort(found, function(a, b)
-		if a.value == b.value then
+		local aScore = a.value + a.mutBonus
+		local bScore = b.value + b.mutBonus
+		if aScore == bScore then
 			return a.distance < b.distance
 		end
-		return a.value > b.value
+		return aScore > bScore
 	end)
 
 	return found
@@ -1721,6 +1702,7 @@ end
 
 local function grabCrystal(inst, prompt)
 	local sent = false
+	local value = crystalValue(inst)
 
 	if HoldComplete then
 		sent = pcall(function()
@@ -1740,6 +1722,27 @@ local function grabCrystal(inst, prompt)
 		local ok, detector = pcall(inst.FindFirstChildWhichIsA, inst, "ClickDetector", true)
 		if ok and detector then
 			sent = pcall(fireclickdetector, detector, 0)
+		end
+	end
+
+	-- Track session stats
+	if sent then
+		EXT.picked += 1
+		EXT.earned += value
+
+		-- Webhook for rare finds
+		if EXT.webhook ~= "" then
+			local tier = crystalTier(inst)
+			if not EXT.webhookRare or tier >= 5 then
+				local name = crystalName(inst)
+				local rarity = crystalRarity(inst)
+				local mutation = getAttr(inst, "Mutation") or ""
+				local title = string.format("Picked: %s", name)
+				local desc = string.format("Rarity: %s | Value: %s | Weight: %s%s",
+					rarity, formatShort(value, "$"), formatWeight(crystalWeight(inst)),
+					(mutation ~= "" and (" | Mutation: " .. mutation) or ""))
+				EXT.webhookSend(title, desc, 0x00FF00)
+			end
 		end
 	end
 
@@ -3611,6 +3614,7 @@ local netConns = {}
 
 do
 	local function install()
+		local HttpService = game:GetService("HttpService")
 		local TeleportService = game:GetService("TeleportService")
 		local GuiService = game:GetService("GuiService")
 		local PLACE = game.PlaceId
@@ -3638,15 +3642,8 @@ do
 		end
 
 		local function grab(link)
-			-- Delta: priority HttpService:GetAsync, fallback request
-			local ok, body = pcall(function()
-				return HttpService:GetAsync(link)
-			end)
-			if ok and type(body) == "string" then
-				return body, 200
-			end
-
 			local sender = (syn and syn.request) or (http and http.request) or http_request or request
+
 			if type(sender) == "function" then
 				local ok, response = pcall(function()
 					return sender({ Url = link, Method = "GET" })
@@ -5624,606 +5621,548 @@ do
 	install()
 end
 
--- ============================================================
--- Smart Collector — auto TP to best crystal + grab
--- ============================================================
-local Collector = {}
-local collectorConn
-
+-- === NEW FEATURES MODULE ===
 do
 	local function install()
-		local MODES = { "Highest Value", "Highest Luck", "Highest Weight", "Best Value/Dist", "Nearest" }
-		local GRAB_WAIT = 0.4
-
-		local active = false
-		local mode = 1
-		local minVal = 2000000
-		local filterOn = true
-		local target, phase, waitUntil, statusText
-
-		local function reset()
-			target = nil
-			phase = "idle"
-			waitUntil = 0
-			statusText = "Idle"
-		end
-
-		local function crystalScore(inst)
-			local root = getRoot()
-			if mode == 1 then return crystalValue(inst)
-			elseif mode == 2 then return crystalLuck(inst)
-			elseif mode == 3 then return crystalWeight(inst)
-			elseif mode == 4 then
-				local dist = root and (inst.Position - root.Position).Magnitude or 1
-				return crystalValue(inst) / math.max(dist, 1)
-			else
-				return root and -(inst.Position - root.Position).Magnitude or 0
-			end
-		end
-
-		local function findBest()
-			local best, bestScore
-			for inst in pairs(registry) do
-				if inst.Parent and getAttr(inst, "Collected") ~= true then
-					local val = crystalValue(inst)
-					if not filterOn or val >= minVal then
-						local s = crystalScore(inst)
-						if s and (not best or s > bestScore) then
-							best = inst
-							bestScore = s
-						end
+		-- Discord Webhook
+		function EXT.webhookSend(title, desc, color)
+			if EXT.webhook == "" then return end
+			task.spawn(function()
+				local ok, req = pcall(function()
+					local body = game:GetService("HttpService"):JSONEncode({
+						embeds = {{
+							title = title,
+							description = desc,
+							color = color or 5763719,
+							footer = { text = "Mine a Mountain" },
+							timestamp = DateTime.now():ToIsoDate(),
+						}}
+					})
+					local sender = (syn and syn.request) or (http and http.request) or http_request or request
+					if type(sender) == "function" then
+						sender({ Url = EXT.webhook, Method = "POST", Headers = { ["Content-Type"] = "application/json" }, Body = body })
+					else
+						game:HttpGet(EXT.webhook .. "?wait=1", true)
 					end
-				end
-			end
-			return best
+				end)
+				if not ok then reportError("webhook", req) end
+			end)
 		end
 
-		local function step()
-			local root = getRoot()
-			if not root then
-				statusText = "No character"
-				return
+		-- Auto Sell check (called from heartbeat)
+		local function tryAutoSell()
+			if not EXT.autoSell or not SellRequest then return false end
+			local cap = backpackCapacity()
+			if cap == math.huge then return false end
+			local ratio = backpackWeight() / cap
+			if ratio >= (EXT.sellThreshold / 100) then
+				doSell()
+				EXT.sold += 1
+				return true
 			end
+			return false
+		end
 
-			local now = os.clock()
-
-			if phase == "idle" then
-				local best = findBest()
-				if not best then
-					statusText = "No targets"
-					return
+		-- Auto Upgrade: try to buy pickaxe/backpack upgrades
+		local BUY_REMOTES = { "BuyItem", "PurchaseItem", "BuyUpgrade", "UpgradeRequest", "ShopPurchase" }
+		local function tryAutoUpgrade()
+			if not EXT.autoUpgrade then return end
+			if not EXT.upgradeRemote or not EXT.upgradeRemote.Parent then
+				for _, name in ipairs(BUY_REMOTES) do
+					local r = findRemote(name)
+					if r then EXT.upgradeRemote = r; break end
 				end
-
-				target = best
-				phase = "move"
-				waitUntil = now + GRAB_WAIT
-				statusText = string.format("%s  %s", crystalName(best), formatShort(crystalValue(best), "$"))
-
-				if not teleportTo(best) then
-					phase = "idle"
-				end
-				return
 			end
-
-			if phase == "move" then
-				if not target or not target.Parent then
-					reset()
-					return
-				end
-
-				if not tpState and now >= waitUntil then
-					phase = "grab"
-				end
-				return
-			end
-
-			if phase == "grab" then
-				if target and target.Parent then
-					grabCrystal(target, crystalPrompt(target))
-					claimed[target] = now
-				end
-				reset()
+			if not EXT.upgradeRemote then return end
+			-- Try common upgrade args
+			local tries = { "pickaxe", "Pickaxe", "backpack", "Backpack", "bag", "Bag" }
+			for _, arg in ipairs(tries) do
+				local ok = pcall(function() EXT.upgradeRemote:FireServer(arg) end)
+				if ok then break end
 			end
 		end
 
-		function Collector.setActive(v)
-			if v and not espActive then
-				Library:Notify("Enable Crystal ESP first", 3)
-				return
+		-- Name filter
+		function EXT.nameFiltered(inst)
+			local name = crystalName(inst)
+			if EXT.whitelistMode == "on" and next(EXT.whitelist) then
+				local found = false
+				for wl in pairs(EXT.whitelist) do
+					if name:find(wl, 1, true) then found = true; break end
+				end
+				if not found then return true end
 			end
-			active = v
-			if v then reset(); statusText = "Active" else reset() end
+			if next(EXT.blacklist) then
+				for bl in pairs(EXT.blacklist) do
+					if name:find(bl, 1, true) then return true end
+				end
+			end
+			return false
 		end
 
-		function Collector.stop()
-			active = false
-			reset()
-		end
-
-		function Collector.setMode(i) mode = math.clamp(i, 1, #MODES) end
-		function Collector.setMinVal(v) minVal = math.max(0, v); filterOn = minVal > 0 end
-		function Collector.modeName() return MODES[mode] end
-
-		-- GUI
-		local Box = Tabs.teleports:AddLeftGroupbox("Smart Collector", "target")
-
-		Box:AddToggle("SmartCollector", {
-			Text = "Auto Collect",
-			Default = false,
-			Callback = Collector.setActive,
-		})
-
-		Box:AddDropdown("CollectorMode", {
-			Text = "Priority",
-			Values = MODES,
-			Default = 1,
-			Callback = Collector.setMode,
-		})
-
-		Box:AddInput("CollectorMinVal", {
-			Text = "Min Value",
-			Default = "2m",
-			Placeholder = "2m",
-			Numeric = false,
-			Finished = false,
-			Callback = function(text)
-				local p = parseValue(text)
-				if p then Collector.setMinVal(p) end
-			end,
-		})
-
-		Box:AddDivider()
-
-		local Status = Box:AddLabel("Idle", true)
-		local labelClock = 0
-
-		collectorConn = RunService.Heartbeat:Connect(function(dt)
-			if active then
-				pcall(step)
-			end
-			labelClock = labelClock + dt
-			if labelClock >= 0.25 then
-				labelClock = 0
-				Status:SetText(statusText or "Idle")
-			end
-		end)
-	end
-
-	install()
-end
-
--- ============================================================
--- Auto Upgrade — auto beli pickaxe & backpack upgrade
--- ============================================================
-local AutoBuy = {}
-local autoBuyConn
-
-do
-	local function install()
-		local CHECK_GAP = 3
-		local BUY_DELAY = 1.5
-
-		local active = false
-		local buyPick = false
-		local buyBag = false
-		local remote
-		local checkClock = 0
-		local lastBuy = 0
-		local statusText = "Idle"
-
-		local function reset()
-			statusText = "Idle"
-		end
-
-		local function shopRemote()
-			if remote and remote.Parent then return remote end
-			for _, name in ipairs({ "BuyItem", "PurchaseRequest", "BuyRequest", "ShopBuy" }) do
-				local r = findRemote(name)
-				if r then remote = r; return r end
-			end
-			return nil
-		end
-
-		local function myMoney()
-			for _, name in ipairs({ "Cash", "Money", "Balance", "Coins" }) do
-				local v = realStat(name)
-				if v then return v end
-			end
-			local data = LocalPlayer:FindFirstChild("PlayerData")
-			local stats = data and data:FindFirstChild("RealStats")
-			if stats then
-				for _, c in ipairs(stats:GetChildren()) do
-					local n = c.Name:lower()
-					if n == "cash" or n == "money" or n == "balance" or n == "coins" then
-						return tonumber(c.Value) or 0
-					end
+		-- Mutation priority score (added to value-based sorting)
+		function EXT.mutationBonus(inst)
+			if not EXT.mutationPriActive or not next(EXT.mutationPri) then return 0 end
+			local mut = getAttr(inst, "Mutation")
+			if type(mut) == "string" and EXT.mutationPri[mut] then return 1e9 end
+			local extra = getAttr(inst, "ExtraMutations")
+			if type(extra) == "string" then
+				for m in string.gmatch(extra, "[^,]+") do
+					if EXT.mutationPri[m] then return 1e9 end
 				end
 			end
 			return 0
 		end
 
-		local function bestPickaxe()
-			local best, bestScore
-			local function score(t)
-				if not t or not t:IsA("Tool") then return 0 end
-				local s = 1
-				local dp = tonumber(getAttr(t, "DigPower"))
-				if dp then s = s + dp end
-				return s
-			end
-
-			local char = LocalPlayer.Character
-			local held = char and char:FindFirstChildOfClass("Tool")
-			if held then best = held; bestScore = score(held) end
-
-			local bp = LocalPlayer:FindFirstChildOfClass("Backpack")
-			if bp then
-				for _, t in ipairs(bp:GetChildren()) do
-					local s = score(t)
-					if s > (bestScore or 0) then best = t; bestScore = s end
-				end
-			end
-			return best
+		-- Macro system
+		local function macroSave()
+			local data = game:GetService("HttpService"):JSONEncode(EXT.macroSeq)
+			local folder = "UniverseMacros"
+			local ok = pcall(function() writefile(folder .. "/last.json", data) end)
+			if not ok then Library:Notify("Macro saved to memory only", 2) end
 		end
 
-		local function buyItem(name)
-			local r = shopRemote()
-			if not r then return false, "no remote" end
-			if os.clock() - lastBuy < BUY_DELAY then return false, "cooldown" end
-			lastBuy = os.clock()
-
-			local ok = pcall(function()
-				r:FireServer(name)
-			end)
-			if not ok then
-				ok = pcall(function()
-					r:FireServer(name, 1)
-				end)
-			end
-			return ok, ok and "ok" or "failed"
+		function EXT.macroStartRecord()
+			EXT.macroSeq = {}
+			EXT.macroRecording = true
+			Library:Notify("Macro recording...", 2)
 		end
 
-		local function step()
+		function EXT.macroStopRecord()
+			EXT.macroRecording = false
+			macroSave()
+			Library:Notify(string.format("Macro saved (%d steps)", #EXT.macroSeq), 2)
+		end
+
+		function EXT.macroPlay()
+			if #EXT.macroSeq == 0 then Library:Notify("No macro recorded", 2) return end
+			EXT.macro = true
+			EXT.macroIdx = 1
+			EXT.macroClock = 0
+			Library:Notify("Playing macro", 2)
+		end
+
+		function EXT.macroStop()
+			EXT.macro = false
+			EXT.macroIdx = 0
+			EXT.macroStep = 0
+		end
+
+		-- Collector Mode: systematic grid sweep picking crystals
+		local function collectorStep()
+			if not EXT.collector then return end
+			local root = getRoot()
+			if not root then return end
+
 			local now = os.clock()
-			if now - checkClock < CHECK_GAP then return end
-			checkClock = now
+			if now - EXT.collectorClock < 0.3 then return end
+			EXT.collectorClock = now
 
-			local remoteOk = shopRemote() ~= nil
-
-			if remoteOk and buyPick then
-				local held = bestPickaxe()
-				local money = formatShort(myMoney(), "$")
-				if held then
-					local power = tonumber(getAttr(held, "DigPower")) or 0
-					statusText = string.format("Pick: %s (%d)  %s", held.Name, power, money)
-				else
-					statusText = string.format("No pickaxe  %s", money)
+			if EXT.collectorTarget and EXT.collectorTarget.Parent then
+				local dist = (EXT.collectorTarget.Position - root.Position).Magnitude
+				if dist > PICK.range then
+					teleportTo(EXT.collectorTarget)
+					return
 				end
-
-				pcall(buyItem, "Pickaxe")
+				if autoPickupActive then return end
 			end
 
-			if remoteOk and buyBag then
-				pcall(buyItem, "Backpack")
+			local free = backpackFree()
+			if free <= 0 then
+				if EXT.autoSell then tryAutoSell() end
+				return
 			end
 
-			if not buyPick and not buyBag then
-				statusText = "Idle"
-			elseif not remoteOk then
-				statusText = "No shop remote found"
+			local best, bestDist
+			eachContainer(function(container)
+				for _, child in ipairs(container:GetChildren()) do
+					if isCrystal(child) and getAttr(child, "Collected") ~= true then
+						local v = crystalValue(child)
+						if meetsFilter(child, v) and not (EXT.nameFiltered and EXT.nameFiltered(child)) then
+							local w = crystalWeight(child)
+							if w <= free then
+								local d = (child.Position - root.Position).Magnitude
+								if d <= EXT.collectorRadius and (not best or d < bestDist) then
+									best = child; bestDist = d
+								end
+							end
+						end
+					end
+				end
+			end)
+
+			if best then
+				EXT.collectorTarget = best
+				teleportTo(best)
+				schedule(0.1, function()
+					if best.Parent then grabCrystal(best, crystalPrompt(best)) end
+				end)
+			else
+				-- Move to new area
+				local origin = EXT.collectorOrigin or root.Position
+				local spread = EXT.collectorRadius * 0.6
+				local newPos = origin + Vector3.new(
+					math.random(-spread, spread),
+					0,
+					math.random(-spread, spread)
+				)
+				teleportTo(newPos)
+				EXT.collectorOrigin = EXT.collectorOrigin or root.Position
 			end
 		end
 
-		function AutoBuy.setActive(v)
-			active = v
-			if not v then reset() end
+		-- Radar Minimap
+		local function radarCreate()
+			if radarGui and radarGui.Parent then radarGui:Destroy() end
+			local screen = (pcall(function() return gethui() end)) or CoreGui
+			local frame = Instance.new("Frame")
+			frame.Name = "UniverseRadar"
+			frame.Size = UDim2.new(0, 180, 0, 180)
+			frame.Position = UDim2.new(1, -200, 1, -200)
+			frame.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+			frame.BackgroundTransparency = 0.4
+			frame.BorderSizePixel = 0
+			frame.Parent = screen
+
+			local corner = Instance.new("UICorner")
+			corner.CornerRadius = UDim.new(0, 90)
+			corner.Parent = frame
+
+			local clip = Instance.new("UIGradient")
+			clip.Rotation = 90
+			clip.Parent = frame
+
+			radarGui = frame
+			return frame
 		end
 
-		function AutoBuy.stop()
-			active = false
-			reset()
+		local radarDots = {}
+		local function radarUpdate()
+			if not EXT.radar or not radarGui then return end
+			local root = getRoot()
+			if not root then return end
+			local origin = root.Position
+			local half = EXT.collectorRadius
+			if half <= 0 then half = 100 end
+			local scale = 80 / half
+
+			-- Clear old dots
+			for _, d in ipairs(radarDots) do
+				if d.Parent then d:Destroy() end
+			end
+			table.clear(radarDots)
+
+			local count = 0
+			for inst in pairs(registry) do
+				if inst.Parent and not getAttr(inst, "Collected") and meetsFilter(inst) then
+					local rel = (inst.Position - origin) * scale
+					if rel.Magnitude <= 85 then
+						local dot = Instance.new("Frame")
+						dot.Size = UDim2.new(0, 6, 0, 6)
+						dot.Position = UDim2.new(0.5, rel.X, 0.5, rel.Z)
+						dot.BackgroundColor3 = crystalColor(inst)
+						dot.BackgroundTransparency = 0
+						dot.BorderSizePixel = 0
+						local c = Instance.new("UICorner")
+						c.CornerRadius = UDim.new(0, 3)
+						c.Parent = dot
+						dot.Parent = radarGui
+						radarDots[#radarDots + 1] = dot
+						count += 1
+					end
+				end
+			end
+
+			-- Center dot (player)
+			local center = Instance.new("Frame")
+			center.Size = UDim2.new(0, 8, 0, 8)
+			center.Position = UDim2.new(0.5, -4, 0.5, -4)
+			center.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+			center.BackgroundTransparency = 0
+			center.BorderSizePixel = 0
+			local cc = Instance.new("UICorner")
+			cc.CornerRadius = UDim.new(0, 4)
+			cc.Parent = center
+			center.Parent = radarGui
+			center.ZIndex = 2
+			radarDots[#radarDots + 1] = center
 		end
 
-		function AutoBuy.setBuyPick(v) buyPick = v end
-		function AutoBuy.setBuyBag(v) buyBag = v end
-
-		-- GUI
-		local Box = Tabs.farming:AddLeftGroupbox("Auto Upgrade", "shopping-cart")
-
-		Box:AddToggle("AutoBuy", {
-			Text = "Auto Buy",
-			Default = false,
-			Callback = AutoBuy.setActive,
-		})
-
-		Box:AddDivider()
-
-		Box:AddToggle("AutoBuyPick", {
-			Text = "Auto Pickaxe",
-			Default = false,
-			Callback = AutoBuy.setBuyPick,
-		})
-
-		Box:AddToggle("AutoBuyBag", {
-			Text = "Auto Backpack",
-			Default = false,
-			Callback = AutoBuy.setBuyBag,
-		})
-
-		Box:AddDivider()
-
-		local Status = Box:AddLabel("Idle", true)
-		local labelClock = 0
-
-		autoBuyConn = RunService.Heartbeat:Connect(function(dt)
-			if active then
-				pcall(step)
-			end
-			labelClock = labelClock + dt
-			if labelClock >= 0.25 then
-				labelClock = 0
-				Status:SetText(statusText or "Idle")
-			end
-		end)
-	end
-
-	install()
-end
-
--- ============================================================
--- Auto Rune Equip — auto activate priority runes
--- ============================================================
-local RuneEquip = {}
-local runeEquipConn
-
-do
-	local function install()
-		local RUNE_ORDER = { "Luck", "Haste", "Weight", "Storm", "Fortune", "Detonation", "Excavator", "Colossus", "Preservation", "Warmth" }
-		local CHECK_GAP = 6
-		local EQUIP_DELAY = 2
-
-		local on = false
-		local checkClock = 0
-		local lastAct = 0
-		local equipRemote
-		local statusText = "Idle"
-
-		local function eqRemote()
-			if equipRemote and equipRemote.Parent then return equipRemote end
-			for _, n in ipairs({ "EquipRune", "ActivateRune", "UseRune", "ApplyRune", "RuneRequest" }) do
-				local r = findRemote(n)
-				if r then equipRemote = r; return r end
-			end
-			return nil
+		-- Session stats text
+		local function sessionStatsText()
+			local elapsed = os.clock() - EXT.startTime
+			local hours = math.floor(elapsed / 3600)
+			local mins = math.floor((elapsed % 3600) / 60)
+			return string.format("Session: %dh %dm\nEarned: %s\nPicked: %d\nSold: %d",
+				hours, mins, formatShort(EXT.earned, "$"), EXT.picked, EXT.sold)
 		end
 
-		local function activeRunes()
-			local data = LocalPlayer:FindFirstChild("PlayerData")
-			local plot = data and data:FindFirstChild("PlotData")
-			local runes = plot and plot:FindFirstChild("Runes")
-			if not runes then return {} end
-
-			local map = {}
-			for _, child in ipairs(runes:GetChildren()) do
-				local name = child:GetAttribute("RuneName")
-				if type(name) == "string" and name ~= "" then
-					local rem = tonumber(child:GetAttribute("Remaining")) or 0
-					for _, kw in ipairs(RUNE_ORDER) do
-						if name:find(kw, 1, true) then
-							map[kw] = rem
+		-- Enhanced farming: find closest boulder (not just static spots)
+		local FARM_KINDS_ALL = { "Mossite", "Voltite", "Gildrite", "Rimeveil", "Nocturnite" }
+		function EXT.closestBoulder()
+			local root = getRoot()
+			if not root then return nil end
+			local best, bestDist
+			local decorations = Workspace:FindFirstChild("MountainDecorations")
+			local boulders = decorations and decorations:FindFirstChild("Boulders")
+			if boulders then
+				for _, child in ipairs(boulders:GetChildren()) do
+					for _, kind in ipairs(FARM_KINDS_ALL) do
+						if child.Name:find(kind, 1, true) then
+							local hp = tonumber(getAttr(child, "Health") or getAttr(child, "Hp") or 0)
+							if hp and hp > 0 then
+								local pos = child:IsA("BasePart") and child.Position or (child:GetPivot() and child:GetPivot().Position)
+								if pos then
+									local d = (pos - root.Position).Magnitude
+									if not best or d < bestDist then
+										best = child; bestDist = d
+									end
+								end
+							end
 							break
 						end
 					end
 				end
 			end
-			return map
+			return best, bestDist
 		end
 
-		local function backpackRunes()
-			local list = {}
-			local function scan(container)
-				if not container then return end
-				for _, child in ipairs(container:GetChildren()) do
-					local rn = child:GetAttribute("RuneName") or child:GetAttribute("RuneId")
-					if type(rn) == "string" and rn ~= "" then
-						list[#list + 1] = { inst = child, name = rn }
-					elseif child.Name:find(" Rune", 1, true) then
-						list[#list + 1] = { inst = child, name = child.Name:gsub(" Rune", "") }
+		-- === GUI ===
+		-- Auto Sell (in Farming tab)
+		local function doGui()
+			local PickupBox = Tabs.farming:AddRightGroupbox("Auto Sell", "dollar-sign")
+			PickupBox:AddToggle("ExtAutoSell", {
+				Text = "Auto Sell",
+				Default = false,
+				Callback = function(v) EXT.autoSell = v end,
+			})
+			PickupBox:AddSlider("ExtSellThreshold", {
+				Text = "Sell At %",
+				Default = 85, Min = 30, Max = 100, Rounding = 0, Suffix = "%",
+				Callback = function(v) EXT.sellThreshold = v end,
+			})
+			PickupBox:AddSlider("ExtSellInterval", {
+				Text = "Interval (s)",
+				Default = 120, Min = 30, Max = 600, Rounding = 0, Suffix = "s",
+				Callback = function(v) EXT.sellInterval = v end,
+			})
+			PickupBox:AddDivider()
+			PickupBox:AddLabel("Auto Sell triggers when bag >= threshold OR every N seconds", true)
+
+			-- Mutation Priority (in Crystals tab)
+			local MutBox = Tabs.crystals:AddRightGroupbox("Mutation Priority", "star")
+			MutBox:AddToggle("ExtMutationPri", {
+				Text = "Priority Mode",
+				Default = false,
+				Callback = function(v) EXT.mutationPriActive = v end,
+			})
+			local mutNames = { "Terminus", "Onyx", "Gilded", "Voltaic", "Verdant", "Radioactive", "Aurora", "Starfall" }
+			MutBox:AddDropdown("ExtMutationPick", {
+				Text = "Priority Mutation",
+				Values = mutNames, Multi = true, AllowNull = true,
+				Callback = function(v)
+					table.clear(EXT.mutationPri)
+					if type(v) == "table" then
+						for _, m in ipairs(v) do EXT.mutationPri[m] = true end
+					elseif type(v) == "string" then
+						EXT.mutationPri[v] = true
 					end
-				end
-			end
-			scan(LocalPlayer:FindFirstChildOfClass("Backpack"))
-			scan(LocalPlayer.Character)
-			return list
-		end
+				end,
+			})
+			MutBox:AddLabel("Crystals with these mutations get picked first", true)
 
-		local function tryActivate(name)
-			local r = eqRemote()
-			if not r then return false end
-			if os.clock() - lastAct < EQUIP_DELAY then return false end
-			lastAct = os.clock()
-			return pcall(function() r:FireServer(name) end)
-				or pcall(function() r:FireServer("Rune", name) end)
-				or pcall(function() r:FireServer(name, 1) end)
-		end
-
-		local function step()
-			local now = os.clock()
-			if now - checkClock < CHECK_GAP then return end
-			checkClock = now
-
-			local act = activeRunes()
-			local count = 0
-			for _ in pairs(act) do count = count + 1 end
-
-			if not eqRemote() then
-				statusText = string.format("Runes: %d active  (no remote)", count)
-				return
-			end
-
-			local bp = backpackRunes()
-			for _, pri in ipairs(RUNE_ORDER) do
-				if not act[pri] or act[pri] == 0 then
-					for _, item in ipairs(bp) do
-						if item.name:find(pri, 1, true) then
-							if tryActivate(item.name) then
-								statusText = string.format("Activating %s", item.name)
-							end
-							return
-						end
+			-- Name Filter
+			local FilterBox = Tabs.crystals:AddRightGroupbox("Name Filter", "filter")
+			FilterBox:AddDropdown("ExtWhitelistMode", {
+				Text = "Mode",
+				Values = { "off", "on" }, Default = 1,
+				Callback = function(v) EXT.whitelistMode = v end,
+			})
+			FilterBox:AddInput("ExtWhitelistInput", {
+				Text = "Only show (comma-sep)",
+				Placeholder = "Terminus, Gilded",
+				Callback = function(v)
+					table.clear(EXT.whitelist)
+					for w in string.gmatch(v or "", "[^,]+") do
+						local trimmed = w:match("^%s*(.-)%s*$")
+						if trimmed ~= "" then EXT.whitelist[trimmed] = true end
 					end
-				end
-			end
+				end,
+			})
+			FilterBox:AddInput("ExtBlacklistInput", {
+				Text = "Skip (comma-sep)",
+				Placeholder = "Common, Uncommon",
+				Callback = function(v)
+					table.clear(EXT.blacklist)
+					for w in string.gmatch(v or "", "[^,]+") do
+						local trimmed = w:match("^%s*(.-)%s*$")
+						if trimmed ~= "" then EXT.blacklist[trimmed] = true end
+					end
+				end,
+			})
 
-			local parts = {}
-			for k in pairs(act) do parts[#parts + 1] = k end
-			statusText = #parts > 0 and string.format("Runes: %s", table.concat(parts, ", ")) or "No runes"
-		end
+			-- Auto Upgrade (in Farming tab)
+			local UpgradeBox = Tabs.farming:AddRightGroupbox("Auto Upgrade", "trending-up")
+			UpgradeBox:AddToggle("ExtAutoUpgrade", {
+				Text = "Auto Upgrade",
+				Default = false,
+				Callback = function(v) EXT.autoUpgrade = v end,
+			})
+			UpgradeBox:AddLabel("Automatically buys pickaxe/backpack upgrades", true)
 
-		function RuneEquip.setActive(v)
-			on = v
-			if not v then statusText = "Idle" end
-		end
+			-- Macro (in Movement tab)
+			local MacroBox = Tabs.movement:AddRightGroupbox("Macro", "play-circle")
+			MacroBox:AddButton("Record Start", function() EXT.macroStartRecord() end)
+			MacroBox:AddButton("Record Stop", function() EXT.macroStopRecord() end)
+			MacroBox:AddButton("Play Macro", function() EXT.macroPlay() end)
+			MacroBox:AddButton("Stop Macro", function() EXT.macroStop() end)
+			MacroBox:AddToggle("ExtMacroLoop", {
+				Text = "Loop",
+				Default = false,
+				Callback = function(v) EXT.macroLoop = v end,
+			})
 
-		function RuneEquip.stop()
-			on = false
-			statusText = "Idle"
-		end
+			-- Collector Mode (in Farming tab)
+			local CollectBox = Tabs.farming:AddRightGroupbox("Collector", "compass")
+			CollectBox:AddToggle("ExtCollector", {
+				Text = "Collector Mode",
+				Default = false,
+				Callback = function(v)
+					EXT.collector = v
+					EXT.collectorOrigin = nil
+					EXT.collectorTarget = nil
+				end,
+			})
+			CollectBox:AddSlider("ExtCollectorRadius", {
+				Text = "Radius",
+				Default = 100, Min = 30, Max = 500, Rounding = 0, Suffix = "s",
+				Callback = function(v) EXT.collectorRadius = v end,
+			})
 
-		local Box = Tabs.farming:AddLeftGroupbox("Rune Manager", "zap")
-		Box:AddToggle("AutoRuneEquip", {
-			Text = "Auto Equip Runes",
-			Default = false,
-			Callback = RuneEquip.setActive,
-		})
-		Box:AddDivider()
-		local Status = Box:AddLabel("Idle", true)
-		local labelClock = 0
+			-- Radar (in Crystals tab)
+			local RadarBox = Tabs.crystals:AddRightGroupbox("Radar", "map")
+			RadarBox:AddToggle("ExtRadar", {
+				Text = "Show Radar",
+				Default = false,
+				Callback = function(v)
+					EXT.radar = v
+					if v and not radarGui then radarCreate() end
+					if not v and radarGui then radarGui:Destroy(); radarGui = nil end
+				end,
+			})
 
-		runeEquipConn = RunService.Heartbeat:Connect(function(dt)
-			if on then pcall(step) end
-			labelClock = labelClock + dt
-			if labelClock >= 0.25 then
-				labelClock = 0
-				Status:SetText(statusText or "Idle")
-			end
-		end)
-	end
-	install()
-end
+			-- Webhook (in Settings tab)
+			local WebBox = SettingsTab:AddLeftGroupbox("Discord Webhook", "message-circle")
+			WebBox:AddInput("ExtWebhookUrl", {
+				Text = "Webhook URL",
+				Placeholder = "https://discord.com/api/webhooks/...",
+				Callback = function(v) EXT.webhook = v or "" end,
+			})
+			WebBox:AddToggle("ExtWebhookRare", {
+				Text = "Rare Only (Mythic+)",
+				Default = true,
+				Callback = function(v) EXT.webhookRare = v end,
+			})
 
--- ============================================================
--- Anti-Afk Terintegrasi — random walk + camera rotate
--- ============================================================
-local AntiAfk = {}
-local antiAfkConn
-
-do
-	local function install()
-		local MIN_GAP = 30
-		local MAX_GAP = 90
-		local WALK_CHANCE = 0.3
-		local WALK_DIST = 6
-		local CAM_ANGLE = 25
-
-		local on = false
-		local timer = 0
-		local nextAt = math.random(MIN_GAP, MAX_GAP)
-		local statusText = "Idle"
-
-		local function hum()
-			local char = LocalPlayer.Character
-			return char and char:FindFirstChildOfClass("Humanoid")
-		end
-
-		local function rotateCam()
-			local camera = Workspace.CurrentCamera
-			if not camera then return end
-			local yaw = math.rad(math.random(-CAM_ANGLE, CAM_ANGLE))
-			local pitch = math.rad(math.random(-10, 10))
-			camera.CFrame = camera.CFrame * CFrame.Angles(pitch, yaw, 0)
-		end
-
-		local function walkStep()
-			local h = hum()
-			if not h then return end
-			local root = h.RootPart
-			if not root then return end
-			local dir = Vector3.new(math.random(-100, 100), 0, math.random(-100, 100)).Unit
-			h.WalkToPoint = root.Position + dir * WALK_DIST
-			task.delay(1, function()
-				if h and h.Parent and root and root.Parent then
-					h.WalkToPoint = root.Position
+			-- Session Stats (in Settings tab)
+			local StatsBox = SettingsTab:AddRightGroupbox("Session Stats", "bar-chart")
+			local StatsLabel = StatsBox:AddLabel(sessionStatsText(), true)
+			local statsTimer = 0
+			local statsConn = RunService.Heartbeat:Connect(function(dt)
+				statsTimer += dt
+				if statsTimer >= 2 then
+					statsTimer = 0
+					StatsLabel:SetText(sessionStatsText())
 				end
 			end)
+			table.insert(netConns, statsConn)
 		end
 
-		function AntiAfk.setActive(v)
-			on = v
-			timer = 0
-			nextAt = math.random(MIN_GAP, MAX_GAP)
-			statusText = v and "Active" or "Idle"
-		end
+		local ok, err = pcall(doGui)
+		if not ok then reportError("extGui", err) end
 
-		function AntiAfk.stop()
-			on = false
-			statusText = "Idle"
-			local h = hum()
-			if h and h.RootPart then
-				pcall(function() h.WalkToPoint = h.RootPart.Position end)
-			end
-		end
-
-		-- GUI in Movement tab
-		local Box = Tabs.movement:AddRightGroupbox("Anti-Afk", "shield")
-		Box:AddToggle("AntiAfk", {
-			Text = "Humanizer",
-			Default = false,
-			Callback = AntiAfk.setActive,
-		})
-		Box:AddLabel("Random walk + camera rotate to avoid detection", true)
-		Box:AddDivider()
-		local Status = Box:AddLabel("Idle", true)
-		local labelClock = 0
-
-		antiAfkConn = RunService.Heartbeat:Connect(function(dt)
-			if not on then
-				labelClock = labelClock + dt
-				if labelClock >= 0.25 then
-					labelClock = 0
-					Status:SetText("Idle")
+		-- Hook into existing heartbeat for auto sell, collector, macro
+		local extConn = RunService.Heartbeat:Connect(function(deltaTime)
+			-- Auto sell periodic check
+			if EXT.autoSell then
+				EXT.sellClock += deltaTime
+				if EXT.sellClock >= EXT.sellInterval then
+					EXT.sellClock = 0
+					tryAutoSell()
 				end
-				return
 			end
 
-			timer = timer + dt
-			if timer >= nextAt then
-				timer = 0
-				nextAt = math.random(MIN_GAP, MAX_GAP)
+			-- Auto upgrade
+			if EXT.autoUpgrade then
+				EXT.upgradeClock += deltaTime
+				if EXT.upgradeClock >= 30 then
+					EXT.upgradeClock = 0
+					tryAutoUpgrade()
+				end
+			end
 
-				local root = getRoot()
-				if root and root.Velocity.Magnitude < 1 and not tpState then
-					rotateCam()
-					if math.random() < WALK_CHANCE then
-						walkStep()
-						statusText = "Walking"
-					else
-						statusText = "Camera rotate"
+			-- Collector mode
+			if EXT.collector then
+				collectorStep()
+			end
+
+			-- Radar update
+			if EXT.radar then
+				EXT.radarClock += deltaTime
+				if EXT.radarClock >= 0.5 then
+					EXT.radarClock = 0
+					radarUpdate()
+				end
+			end
+
+			-- Macro playback
+			if EXT.macro and #EXT.macroSeq > 0 and EXT.macroIdx <= #EXT.macroSeq then
+				EXT.macroClock += deltaTime
+				local action = EXT.macroSeq[EXT.macroIdx]
+				if EXT.macroClock >= (action.delay or 0.5) then
+					EXT.macroClock = 0
+					EXT.macroIdx += 1
+					if action.type == "tp" and action.pos then
+						teleportTo(action.pos)
+					elseif action.type == "sell" then
+						doSell()
+					elseif action.type == "home" then
+						fireRemote(GoHome, "home")
 					end
-				else
-					statusText = "Waiting (moving)"
+				end
+				if EXT.macroIdx > #EXT.macroSeq then
+					if EXT.macroLoop then
+						EXT.macroIdx = 1
+						EXT.macroClock = 0
+					else
+						EXT.macro = false
+						EXT.macroIdx = 0
+					end
 				end
 			end
 
-			labelClock = labelClock + dt
-			if labelClock >= 0.25 then
-				labelClock = 0
-				Status:SetText(statusText or "Active")
+			-- Record macro (keyboard-based, capture position)
+			if EXT.macroRecording then
+				-- Record every 0.5s the player's position for TP sequences
+				EXT.macroClock += deltaTime
+				if EXT.macroClock >= 1 then
+					EXT.macroClock = 0
+					local r = getRoot()
+					if r then
+						table.insert(EXT.macroSeq, { type = "tp", pos = r.Position, delay = 1 })
+					end
+				end
 			end
 		end)
+		table.insert(netConns, extConn)
 	end
+
 	install()
 end
+
+-- === END NEW FEATURES MODULE ===
+
+SaveManager:SetLibrary(Library)
 SaveManager:IgnoreThemeSettings()
 SaveManager:SetFolder("Universe")
 
@@ -6355,6 +6294,15 @@ Library:OnUnload(function()
 	espActive = false
 	playerEspActive = false
 	aimTpEnabled = false
+	if EXT then
+		EXT.autoSell = false
+		EXT.autoUpgrade = false
+		EXT.collector = false
+		EXT.macro = false
+		EXT.macroRecording = false
+		EXT.radar = false
+		if radarGui then radarGui:Destroy(); radarGui = nil end
+	end
 	setSpeedBoost(false)
 	finishTeleport()
 
@@ -6404,22 +6352,6 @@ Library:OnUnload(function()
 		Money.stop()
 	end
 
-	if Collector and Collector.stop then
-		Collector.stop()
-	end
-
-	if AutoBuy and AutoBuy.stop then
-		AutoBuy.stop()
-	end
-
-	if RuneEquip and RuneEquip.stop then
-		RuneEquip.stop()
-	end
-
-	if AntiAfk and AntiAfk.stop then
-		AntiAfk.stop()
-	end
-
 	for _, connection in ipairs({
 		aimInputConn,
 		espConn,
@@ -6429,10 +6361,6 @@ Library:OnUnload(function()
 		mountainConn,
 		farmConn,
 		moneyConn,
-		collectorConn,
-		autoBuyConn,
-		runeEquipConn,
-		antiAfkConn,
 	}) do
 		if connection then
 			connection:Disconnect()
@@ -6446,10 +6374,6 @@ Library:OnUnload(function()
 	espConn = nil
 	schedulerConn = nil
 	characterConn = nil
-	collectorConn = nil
-	autoBuyConn = nil
-	runeEquipConn = nil
-	antiAfkConn = nil
 
 	clearRegistry()
 	clearPlayerEsp()
