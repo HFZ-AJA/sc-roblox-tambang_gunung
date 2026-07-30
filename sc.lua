@@ -3895,6 +3895,20 @@ do
 			),
 		}
 
+		local function dynamicSpots()
+			local spot = mountainSpot()
+			if not spot then return SCAN_SPOTS end
+			local spots = {}
+			spots[1] = CFrame.new(spot + Vector3.new(0, 50, 0))
+			spots[2] = CFrame.new(spot + Vector3.new(100, 50, 100))
+			spots[3] = CFrame.new(spot + Vector3.new(-100, 50, -100))
+			for i = 1, 3 do
+				local rot = math.rad(math.random(-180, 180))
+				spots[i] = spots[i] * CFrame.Angles(0, rot, 0)
+			end
+			return spots
+		end
+
 		local TeleportService = game:GetService("TeleportService")
 		local PLACE_ID = game.PlaceId
 
@@ -3979,13 +3993,17 @@ do
 			return false
 		end
 
+		local DIG_REMOTES = { "DigRequest", "Dig", "Mine", "Swing", "MineRequest", "SwingRequest", "HitRequest" }
 		local function digEvent()
 			if digRemote and digRemote.Parent then
 				return digRemote
 			end
 
-			digRemote = findRemote("DigRequest")
-			return digRemote
+			for _, name in ipairs(DIG_REMOTES) do
+				local r = findRemote(name)
+				if r then digRemote = r; return r end
+			end
+			return nil
 		end
 
 		local function isPickaxe(tool)
@@ -4462,15 +4480,20 @@ do
 			return nil
 		end
 
+		local HP_NAMES = { "Health", "Hp", "CurrentHealth", "MaxHealth", "health", "hp", "BoulderHealth", "Durability" }
 		local function boulderHealth(model)
-			local hp = getAttr(model, "Health")
-			if hp == nil then
-				hp = getAttr(model, "Hp")
+			for _, name in ipairs(HP_NAMES) do
+				local hp = getAttr(model, name)
+				if hp ~= nil then return tonumber(hp) end
 			end
-			if hp == nil then
-				hp = getAttr(model, "CurrentHealth")
+			-- Check children for health values
+			for _, child in ipairs(model:GetDescendants()) do
+				if child:IsA("IntValue") or child:IsA("NumberValue") then
+					local name = child.Name:lower()
+					if name == "health" or name == "hp" then return tonumber(child.Value) end
+				end
 			end
-			return tonumber(hp)
+			return nil
 		end
 
 		local function pickTarget()
@@ -4593,9 +4616,10 @@ do
 						waitUntil = now + SCAN_HOLD
 					end
 
-					if scanIndex <= #SCAN_SPOTS then
-						hold(SCAN_SPOTS[scanIndex])
-						statusText = string.format("Scanning %d/%d", scanIndex, #SCAN_SPOTS)
+					local spots = dynamicSpots()
+					if scanIndex <= #spots then
+						hold(spots[scanIndex])
+						statusText = string.format("Scanning %d/%d", scanIndex, #spots)
 
 						if now >= waitUntil then
 							scanIndex += 1
@@ -4610,8 +4634,11 @@ do
 
 				local model = pickTarget()
 				if not model then
-					beginLoot(true)
-					statusText = "Final rune sweep"
+					-- Retry scan with dynamic spots instead of giving up
+					scanIndex = 0
+					scanned = false
+					statusText = "No boulder found, rescanning..."
+					waitUntil = now + 2
 					return
 				end
 
@@ -4904,7 +4931,7 @@ local moneyConn
 
 do
 	local function install()
-		local SCAN_SPOTS = {
+		local MONEY_SCAN_SPOTS = {
 			CFrame.new(
 				-12.7105675,
 				459.090942,
@@ -4948,6 +4975,16 @@ do
 				-0.484902382
 			),
 		}
+
+		local function moneyDynamicSpots()
+			local spot = mountainSpot()
+			if not spot then return MONEY_SCAN_SPOTS end
+			return {
+				CFrame.new(spot + Vector3.new(0, 100, 0)),
+				CFrame.new(spot + Vector3.new(50, 100, 50)),
+				CFrame.new(spot + Vector3.new(-50, 100, -50)),
+			}
+		end
 
 		local SCAN_HOLD = 1.4
 		local PEAK_GAP = 10
@@ -5139,6 +5176,23 @@ do
 
 		local function surfaceAt(x, z)
 			if not insideZone(x, z) then
+				-- Fallback: raycast from high above anywhere
+				local base = zoneBase()
+				local top = math.max(zonePeak(), 900) + RAY_TOP
+				local hit = Workspace:Raycast(
+					Vector3.new(x, top, z),
+					Vector3.new(0, -(top - base + RAY_DROP), 0),
+					surfaceParams
+				)
+				if hit and hit.Position.Y > base + 1 then
+					return hit.Position
+				end
+				-- Try without terrain filter
+				local fallback = Workspace:Raycast(
+					Vector3.new(x, 1500, z),
+					Vector3.new(0, -2000, 0)
+				)
+				if fallback then return fallback.Position end
 				return nil
 			end
 
@@ -5338,9 +5392,10 @@ do
 					scanUntil = now + SCAN_HOLD
 				end
 
-				if scanIndex <= #SCAN_SPOTS then
-					holdAt(SCAN_SPOTS[scanIndex])
-					statusText = string.format("Loading terrain %d/%d", scanIndex, #SCAN_SPOTS)
+				local spots = moneyDynamicSpots()
+				if scanIndex <= #spots then
+					holdAt(spots[scanIndex])
+					statusText = string.format("Loading terrain %d/%d", scanIndex, #spots)
 
 					if now >= scanUntil then
 						scanIndex += 1
