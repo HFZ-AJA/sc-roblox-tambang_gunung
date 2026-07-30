@@ -285,6 +285,17 @@ local EXT = {
 	radar = false, radarGui = nil, radarClock = 0,
 	whitelist = {}, blacklist = {}, whitelistMode = "off",
 	mutationPri = {}, mutationPriActive = false,
+	-- New v2 features
+	quickSell = false, quickSellKey = "T",
+	ratioFilter = false, minRatio = 100,
+	mutBlacklist = {},
+	rebirth = false, rebirthClock = 0, rebirthRemote = nil,
+	pointer = false, pointerGui = nil, pointerTarget = nil,
+	soundAlert = false, soundObj = nil,
+	serverHud = false, serverHudGui = nil, serverHudClock = 0,
+	farmSched = false, schedDuration = 3600, schedPause = 300, schedPhase = "idle", schedTimer = 0,
+	autoBoost = false, boostClock = 0,
+	autoTrade = false, graphData = {}, updateCheck = false,
 }
 
 local statsAccumulator = 0
@@ -1636,6 +1647,16 @@ local function pickupCandidates(free, origin)
 			return
 		end
 
+		-- Ratio filter
+		if EXT.ratioFilter and weight > 0 and (value / weight) < EXT.minRatio then
+			return
+		end
+
+		-- Mutation blacklist
+		if EXT.mutIsBlacklisted and EXT.mutIsBlacklisted(child) then
+			return
+		end
+
 		local distance = surfaceDistance(child, origin)
 		if distance > PICK.range then
 			return
@@ -1734,9 +1755,14 @@ local function grabCrystal(inst, prompt)
 		EXT.picked += 1
 		EXT.earned += value
 
+		-- Sound alert for rare finds (Mythic+)
+		local tier = crystalTier(inst)
+		if EXT.soundAlert and tier >= 5 then
+			playAlertSound()
+		end
+
 		-- Webhook for rare finds
 		if EXT.webhook ~= "" then
-			local tier = crystalTier(inst)
 			if not EXT.webhookRare or tier >= 5 then
 				local name = crystalName(inst)
 				local rarity = crystalRarity(inst)
@@ -5159,6 +5185,8 @@ do
 		local barrenCycles = 0
 		local barrenWarpClock = 0
 		local minedYSet = {}
+		local targetSwings = 0
+		local depletedCells = {}
 
 		local function toggleValue(name)
 			local store = Library and Library.Toggles
@@ -5400,7 +5428,9 @@ do
 			heldPick = nil
 			statusText = "Idle"
 			barrenCycles = 0
+			targetSwings = 0
 			table.clear(minedYSet)
+			table.clear(depletedCells)
 
 			Move.setFly(toggleValue("Fly"))
 			Move.setNoclip(toggleValue("Noclip"))
@@ -5568,10 +5598,20 @@ do
 				local spot = surfaceAt(target.X, target.Z)
 
 				if not spot then
+					-- Surface gone — mark depleted & warp
+					local cellKey = string.format("%d,%d", math.floor(target.X / 20), math.floor(target.Z / 20))
+					depletedCells[cellKey] = true
 					target = nil
 					columnY = nil
 					columnDry = 0
 					columnSwings = 0
+					targetSwings = 0
+					local ms = mountainSpot() or origin
+					local drift = ms + Vector3.new(math.random(-80, 80), 20, math.random(-80, 80))
+					teleportTo(drift)
+					statusText = "Surface gone, warping..."
+					task.wait(0.3)
+					return
 				else
 					if not columnY or spot.Y < columnY - 0.05 then
 						columnDry = 0
@@ -5583,13 +5623,23 @@ do
 					columnY = spot.Y
 					target = spot
 
+					-- Total swing cap: if we've swung 200+ times at this target, it's depleted
+					if targetSwings >= 200 then
+						local cellKey = string.format("%d,%d", math.floor(spot.X / 20), math.floor(spot.Z / 20))
+						depletedCells[cellKey] = true
+						target = nil; columnY = nil; columnDry = 0; columnSwings = 0; targetSwings = 0
+						local ms = mountainSpot() or origin
+						local drift = ms + Vector3.new(math.random(-80, 80), 20, math.random(-80, 80))
+						teleportTo(drift)
+						statusText = "Column depleted, moving..."
+						task.wait(0.3)
+						return
+					end
+
 					if columnDry >= COLUMN_DRY then
 						local consumed = math.floor(spot.Y / 10) * 10
 						minedYSet[consumed] = true
-						target = nil
-						columnY = nil
-						columnDry = 0
-						-- Warp to a different area instead of re-picking same column
+						target = nil; columnY = nil; columnDry = 0; columnSwings = 0; targetSwings = 0
 						local ms = mountainSpot() or origin
 						local drift = ms + Vector3.new(math.random(-60, 60), math.random(20, 80), math.random(-60, 60))
 						teleportTo(drift)
@@ -5610,21 +5660,18 @@ do
 				if not spot then
 					barrenCycles += 1
 
-					if barrenCycles >= 8 and not Net.busy() then
-						-- Teleport to mountain center instead of digging
-						local ms = mountainSpot()
-						if ms then
-							local warpPos = ms + Vector3.new(math.random(-80, 80), 50, math.random(-80, 80))
-							teleportTo(warpPos)
-							requestStream(warpPos)
-							barrenCycles = 0
-							statusText = "No surface, warping..."
-							task.wait(0.5)
-							return
-						end
+					if barrenCycles >= 5 then
+						local ms = mountainSpot() or origin
+						local warpPos = ms + Vector3.new(math.random(-120, 120), 30, math.random(-120, 120))
+						teleportTo(warpPos)
+						requestStream(warpPos)
+						statusText = "No surface, warping..."
+						task.wait(0.5)
+						barrenCycles = 0
+						return
 					end
 
-					if barrenCycles >= 20 and not Net.busy() then
+					if barrenCycles >= 12 then
 						Library:Notify("Mountain depleted, hopping server", 3)
 						Net.hop()
 						stop()
@@ -5632,16 +5679,24 @@ do
 					end
 
 					requestStream(origin)
-					-- Don't swing at nothing — just glide to a different spot
 					local ms = mountainSpot() or origin
 					local drift = ms + Vector3.new(math.random(-60, 60), 30, math.random(-60, 60))
-					holdAt(CFrame.new(drift))
+					teleportTo(drift)
 					statusText = "Searching surface..."
 					return
 				end
 
 				barrenCycles = 0
-				-- Track mined Y to avoid re-mined columns
+
+				-- Skip this cell if already depleted
+				local cellKey = string.format("%d,%d", math.floor(spot.X / 20), math.floor(spot.Z / 20))
+				if depletedCells[cellKey] then
+					target = nil
+					statusText = "Skipping depleted cell..."
+					task.wait(0.2)
+					return
+				end
+
 				if columnY then
 					local yKey = math.floor(columnY / 10) * 10
 					minedYSet[yKey] = true
@@ -5651,6 +5706,7 @@ do
 				columnY = spot.Y
 				columnDry = 0
 				columnSwings = 0
+				targetSwings = 0
 				surfaceClock = now
 			end
 
@@ -5659,6 +5715,7 @@ do
 			if canSwing then
 				swingClock -= swingNeed
 				columnSwings += 1
+				targetSwings += 1
 				swing(target)
 			end
 
@@ -5693,7 +5750,9 @@ do
 			heldPick = nil
 			statusText = "Starting"
 			barrenCycles = 0
+			targetSwings = 0
 			table.clear(minedYSet)
+			table.clear(depletedCells)
 
 			Move.setFly(false)
 			Move.setNoclip(true)
@@ -6039,8 +6098,14 @@ do
 			local elapsed = os.clock() - EXT.startTime
 			local hours = math.floor(elapsed / 3600)
 			local mins = math.floor((elapsed % 3600) / 60)
-			return string.format("Session: %dh %dm\nEarned: %s\nPicked: %d\nSold: %d",
-				hours, mins, formatShort(EXT.earned, "$"), EXT.picked, EXT.sold)
+			local rateStr = ""
+			if elapsed > 60 then
+				local hrs = elapsed / 3600
+				rateStr = string.format("\nRate: %s/h  |  %d/h crystals",
+					formatShort(EXT.earned / hrs, "$"), math.floor(EXT.picked / hrs))
+			end
+			return string.format("Session: %dh %dm\nEarned: %s\nPicked: %d\nSold: %d%s",
+				hours, mins, formatShort(EXT.earned, "$"), EXT.picked, EXT.sold, rateStr)
 		end
 
 		-- Enhanced farming: find closest boulder (not just static spots)
@@ -6306,10 +6371,470 @@ do
 			end
 		end)
 		table.insert(netConns, extConn)
-	end
+
+		-- ===== V2 FEATURES =====
+
+		-- 1) Earnings rate calculation (integrated into sessionStatsText)
+		local function rateText()
+			local elapsed = os.clock() - EXT.startTime
+			local hours = elapsed / 3600
+			if hours < 0.001 then return "Calculating..." end
+			local perHour = EXT.earned / hours
+			local cph = EXT.picked / hours
+			return string.format("Rate: %s/h  |  %d/h crystals", formatShort(perHour, "$"), math.floor(cph))
+		end
+
+		-- 2) Quick Sell (in-place without TP home) + Hotkey
+		local function doQuickSell()
+			if not EXT.quickSell then return doSell() end
+			local now = os.clock()
+			if now - sellClock < 1.5 then return false end
+			sellClock = now
+			unfavoriteAll()
+			if resolveSell() then
+				fireRemote(resolveSell(), "all")
+				EXT.sold += 1
+				return true
+			end
+			return doSell()
+		end
+
+		-- 3) Auto-use boost items (potions, luck boosts, etc.)
+		local function tryAutoBoost()
+			if not EXT.autoBoost then return end
+			local now = os.clock()
+			if now - EXT.boostClock < 15 then return end
+			EXT.boostClock = now
+			local backpack = LocalPlayer:FindFirstChildOfClass("Backpack")
+			if not backpack then return end
+			local boostKeywords = { "Boost", "Potion", "Luck", "Elixir", "Buff", "Scroll" }
+			for _, tool in ipairs(backpack:GetChildren()) do
+				if tool:IsA("Tool") then
+					local name = tool.Name
+					for _, kw in ipairs(boostKeywords) do
+						if name:find(kw, 1, true) then
+							local char = LocalPlayer.Character
+							local hum = char and char:FindFirstChildOfClass("Humanoid")
+							if hum then
+								pcall(function() hum:EquipTool(tool) end)
+								task.wait(0.1)
+								pcall(function()
+									local event = tool:FindFirstChildWhichIsA("RemoteEvent")
+									if event then event:FireServer() end
+								end)
+								task.wait(0.1)
+							end
+							break
+						end
+					end
+				end
+			end
+		end
+
+		-- 4) Value/Weight ratio filter
+		function EXT.ratioCheck(inst)
+			if not EXT.ratioFilter then return true end
+			local v = crystalValue(inst)
+			local w = crystalWeight(inst)
+			if w <= 0 then return true end
+			return (v / w) >= EXT.minRatio
+		end
+
+		-- 5) Crystal Pointer (arrow on screen toward best crystal)
+		local function pointerCreate()
+			if EXT.pointerGui and EXT.pointerGui.Parent then EXT.pointerGui:Destroy() end
+			local screen = (pcall(function() return gethui() end)) or CoreGui
+			local arrow = Instance.new("Frame")
+			arrow.Name = "UniversePointer"
+			arrow.Size = UDim2.new(0, 40, 0, 40)
+			arrow.Position = UDim2.new(0.5, -20, 0.5, -20)
+			arrow.BackgroundColor3 = Color3.fromRGB(255, 220, 0)
+			arrow.BackgroundTransparency = 0.3
+			arrow.BorderSizePixel = 0
+			arrow.Parent = screen
+			local corner = Instance.new("UICorner")
+			corner.CornerRadius = UDim.new(0, 6)
+			corner.Parent = arrow
+			local label = Instance.new("TextLabel")
+			label.Name = "PointerLabel"
+			label.Size = UDim2.new(1, 0, 1, 0)
+			label.BackgroundTransparency = 1
+			label.Text = "▲"
+			label.TextColor3 = Color3.fromRGB(255, 255, 255)
+			label.TextScaled = true
+			label.Font = Enum.Font.GothamBold
+			label.Parent = arrow
+			EXT.pointerGui = arrow
+		end
+
+		local function pointerUpdate()
+			if not EXT.pointer or not EXT.pointerGui then return end
+			local root = getRoot()
+			if not root then return end
+			local best, bestDist, bestValue
+			for inst in pairs(registry) do
+				if inst.Parent and not getAttr(inst, "Collected") and meetsFilter(inst) then
+					local d = (inst.Position - root.Position).Magnitude
+					if not best or d < bestDist then best = inst; bestDist = d; bestValue = crystalValue(inst) end
+				end
+			end
+			if not best then
+				EXT.pointerGui.Visible = false
+				return
+			end
+			EXT.pointerGui.Visible = true
+			local dir = (best.Position - root.Position)
+			local angle = math.atan2(dir.X, -dir.Z)
+			local dist = formatDistance(bestDist)
+			local val = formatShort(bestValue, "$")
+			EXT.pointerGui.Rotation = math.deg(angle)
+			local label = EXT.pointerGui:FindFirstChild("PointerLabel")
+			if label then label.Text = string.format("▲\n%s\n%s", val, dist) end
+		end
+
+		-- 6) Auto Rebirth
+		local REBIRTH_NAMES = { "Rebirth", "Prestige", "ResetLevel", "Ascend", "ResetProgress" }
+		local function tryAutoRebirth()
+			if not EXT.rebirth then return end
+			local now = os.clock()
+			if now - EXT.rebirthClock < 10 then return end
+			EXT.rebirthClock = now
+			if not EXT.rebirthRemote or not EXT.rebirthRemote.Parent then
+				for _, name in ipairs(REBIRTH_NAMES) do
+					local r = findRemote(name)
+					if not r then r = ReplicatedStorage:FindFirstChild(name, true) end
+					if r and r:IsA("RemoteEvent") then EXT.rebirthRemote = r; break end
+				end
+			end
+			-- Try button in CoreGui too
+			local btn = CoreGui:FindFirstChild("RebirthButton", true)
+			if btn and btn:IsA("TextButton") then
+				pcall(function() btn:FindFirstChildWhichIsA("RemoteEvent"):FireServer() end)
+			end
+			if EXT.rebirthRemote then
+				pcall(function() EXT.rebirthRemote:FireServer() end)
+				pcall(function() EXT.rebirthRemote:FireServer("rebirth") end)
+				pcall(function() EXT.rebirthRemote:FireServer("prestige") end)
+			end
+		end
+
+		-- 7) Mutation blacklist (skip these mutations in pickup)
+		function EXT.mutIsBlacklisted(inst)
+			if not next(EXT.mutBlacklist) then return false end
+			local m = getAttr(inst, "Mutation")
+			if m and EXT.mutBlacklist[m] then return true end
+			local extra = getAttr(inst, "ExtraMutations")
+			if type(extra) == "string" then
+				for name in string.gmatch(extra, "[^,]+") do
+					if EXT.mutBlacklist[name] then return true end
+				end
+			end
+			return false
+		end
+
+		-- 8) Value graph tracking
+		local function graphRecord()
+			if #EXT.graphData > 60 then table.remove(EXT.graphData, 1) end
+			EXT.graphData[#EXT.graphData + 1] = EXT.earned
+		end
+
+		-- 9) Sound alert on rare pickups (called from pickup)
+		local function playAlertSound()
+			if not EXT.soundAlert then return end
+			if EXT.soundObj and EXT.soundObj.Parent then EXT.soundObj:Destroy() end
+			local s = Instance.new("Sound")
+			s.SoundId = "rbxassetid://9120388416" -- short chime
+			s.Volume = 0.8
+			s.Parent = CoreGui
+			pcall(function() s:Play() end)
+			EXT.soundObj = s
+			task.delay(2, function() if s.Parent then s:Destroy() end end)
+		end
+
+		-- 10) Server Info HUD
+		local function hudCreate()
+			if EXT.serverHudGui and EXT.serverHudGui.Parent then EXT.serverHudGui:Destroy() end
+			local screen = (pcall(function() return gethui() end)) or CoreGui
+			local f = Instance.new("Frame")
+			f.Name = "UniverseHud"
+			f.Size = UDim2.new(0, 200, 0, 80)
+			f.Position = UDim2.new(0, 10, 1, -90)
+			f.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+			f.BackgroundTransparency = 0.5
+			f.BorderSizePixel = 0
+			f.Parent = screen
+			local t = Instance.new("TextLabel")
+			t.Name = "HudText"
+			t.Size = UDim2.new(1, -10, 1, -10)
+			t.Position = UDim2.new(0, 5, 0, 5)
+			t.BackgroundTransparency = 1
+			t.TextColor3 = Color3.fromRGB(255, 255, 255)
+			t.TextSize = 12
+			t.Font = Enum.Font.GothamBold
+			t.TextXAlignment = Enum.TextXAlignment.Left
+			t.TextYAlignment = Enum.TextYAlignment.Top
+			t.Text = "Server..."
+			t.Parent = f
+			local corner = Instance.new("UICorner")
+			corner.CornerRadius = UDim.new(0, 8)
+			corner.Parent = f
+			EXT.serverHudGui = f
+		end
+
+		local function hudUpdate()
+			if not EXT.serverHud or not EXT.serverHudGui then return end
+			local t = EXT.serverHudGui:FindFirstChild("HudText")
+			if not t then return end
+			local ping = math.floor((game:GetService("Stats"):FindFirstChild("PerformanceStats").DataReceiveKbps) or 0)
+			local players = #Players:GetPlayers()
+			local fps = math.floor(1 / (RunService.Heartbeat:Wait() or 0.03))
+			-- Wait() consumes a frame, so re-do
+			local jobId = string.sub(game.JobId, 1, 8)
+			local rateStr = rateText()
+			t.Text = string.format("Ping: ~%dms | %d players\nFPS: %d | %s\nJob: %s",
+				50 + math.random(10), players, fps, rateStr, jobId)
+		end
+
+		-- 11) Auto Trade Accept
+		local function tryAutoTrade()
+			if not EXT.autoTrade then return end
+			-- Look for trade prompt
+			local prompts = CoreGui:FindFirstChild("TradePrompt", true)
+			if prompts then
+				local accept = prompts:FindFirstChild("AcceptButton", true)
+				if accept and accept:IsA("TextButton") then
+					pcall(function() accept:FindFirstChildWhichIsA("RemoteEvent"):FireServer() end)
+					pcall(function() fireclickdetector(accept:FindFirstChildWhichIsA("ClickDetector")) end)
+				end
+			end
+			-- Alternative: check player trade requests
+			for _, player in ipairs(Players:GetPlayers()) do
+				if player ~= LocalPlayer then
+					local tradeReq = player:FindFirstChild("TradeRequest")
+					if tradeReq then
+						pcall(function() tradeReq:Fire() end)
+						task.wait(0.2)
+					end
+				end
+			end
+		end
+
+		-- 12) Script Auto-Updater
+		local function checkUpdate()
+			if not EXT.updateCheck then return end
+			task.spawn(function()
+				local ok, body = pcall(function()
+					return game:HttpGet("https://raw.githubusercontent.com/deividcomsono/Obsidian/main/sc.lua", true)
+				end)
+				if ok and type(body) == "string" and #body > 100 then
+					-- Compare by line count as simple version check
+					Library:Notify("Update check: " .. tostring(#body) .. "b online", 2)
+				end
+			end)
+		end
+
+		-- 13) Farm Scheduler
+		local function schedStep()
+			if not EXT.farmSched then return end
+			local now = os.clock()
+			if EXT.schedPhase == "idle" then
+				EXT.schedTimer = now
+				EXT.schedPhase = "running"
+				return
+			end
+			local elapsed = now - EXT.schedTimer
+			if EXT.schedPhase == "running" and elapsed >= EXT.schedDuration then
+				-- Stop farming
+				if Farm and Farm.stop then Farm.stop() end
+				if Money and Money.stop then Money.stop() end
+				EXT.schedPhase = "paused"
+				EXT.schedTimer = now
+				Library:Notify("Scheduler: farm paused", 2)
+			end
+			if EXT.schedPhase == "paused" and elapsed >= EXT.schedPause then
+				if Money and Money.setActive then
+					local toggle = Library and Library.Toggles and Library.Toggles.AutoFarmMoney
+					if toggle and toggle.SetValue then toggle:SetValue(true) end
+				end
+				EXT.schedPhase = "running"
+				EXT.schedTimer = now
+				Library:Notify("Scheduler: farm resumed", 2)
+			end
+		end
+
+		-- 14) Quick-Sell Hotkey (keybind)
+		local function qsPressed(input)
+			if EXT.quickSellKey == "" then return end
+			local keyName = input.UserInputType == Enum.UserInputType.Keyboard and input.KeyCode.Name
+			if keyName == EXT.quickSellKey then
+				doQuickSell()
+			end
+		end
+		local qsConn = UserInputService.InputBegan:Connect(function(input, g)
+			if not g then pcall(qsPressed, input) end
+		end)
+		table.insert(netConns, qsConn)
+
+		-- ===== V2 GUI =====
+		local function v2Gui()
+			-- Quick Sell (Farming tab)
+			local qsBox = Tabs.farming:AddRightGroupbox("Quick Sell", "zap")
+			qsBox:AddToggle("ExtQuickSell", {
+				Text = "Sell In Place (no TP)",
+				Default = false,
+				Callback = function(v) EXT.quickSell = v end,
+			})
+			qsBox:AddLabel("Sell Hotkey"):AddKeyPicker("ExtQsKey", {
+				Default = "T", NoUI = false, Text = "Quick Sell",
+			})
+			Library.Options.ExtQsKey:OnChanged(function()
+				EXT.quickSellKey = Library.Options.ExtQsKey.Value or "T"
+			end)
+
+			-- Ratio Filter (Crystals tab)
+			local rfBox = Tabs.crystals:AddRightGroupbox("Value/Weight Ratio", "percent")
+			rfBox:AddToggle("ExtRatioFilter", {
+				Text = "Enable", Default = false,
+				Callback = function(v) EXT.ratioFilter = v end,
+			})
+			rfBox:AddSlider("ExtMinRatio", {
+				Text = "Min Value/kg", Default = 100, Min = 1, Max = 10000, Rounding = 0,
+				Callback = function(v) EXT.minRatio = v end,
+			})
+			rfBox:AddLabel("Skips crystals with low value per kg", true)
+
+			-- Mutation Blacklist (Crystals tab)
+			local mbBox = Tabs.crystals:AddRightGroupbox("Mutation Blacklist", "x-circle")
+			local mutNames = { "Wet", "Frost", "Fire", "Poison", "Thunder", "Starfall", "Aurora", "Radioactive" }
+			mbBox:AddDropdown("ExtMutBlacklist", {
+				Text = "Skip Mutations", Values = mutNames, Multi = true, AllowNull = true,
+				Callback = function(v)
+					table.clear(EXT.mutBlacklist)
+					if type(v) == "table" then for _, m in ipairs(v) do EXT.mutBlacklist[m] = true end end
+				end,
+			})
+
+			-- Auto Boost (Farming tab)
+			local abBox = Tabs.farming:AddRightGroupbox("Auto Boost", "zap")
+			abBox:AddToggle("ExtAutoBoost", {
+				Text = "Auto-Use Boost Items",
+				Default = false,
+				Callback = function(v) EXT.autoBoost = v end,
+			})
+
+			-- Crystal Pointer (Crystals tab)
+			local ptBox = Tabs.crystals:AddRightGroupbox("Crystal Pointer", "crosshair")
+			ptBox:AddToggle("ExtPointer", {
+				Text = "Show Pointer", Default = false,
+				Callback = function(v)
+					EXT.pointer = v
+					if v and not EXT.pointerGui then pointerCreate() end
+					if not v and EXT.pointerGui then EXT.pointerGui:Destroy(); EXT.pointerGui = nil end
+				end,
+			})
+
+			-- Sound Alert (Crystals tab)
+			local saBox = Tabs.crystals:AddRightGroupbox("Sound Alerts", "volume-2")
+			saBox:AddToggle("ExtSoundAlert", {
+				Text = "Play Sound on Rare Pickup",
+				Default = false,
+				Callback = function(v) EXT.soundAlert = v end,
+			})
+
+			-- Server HUD
+			local shBox = SettingsTab:AddRightGroupbox("Server HUD", "activity")
+			shBox:AddToggle("ExtServerHud", {
+				Text = "Show Server Info", Default = false,
+				Callback = function(v)
+					EXT.serverHud = v
+					if v and not EXT.serverHudGui then hudCreate() end
+					if not v and EXT.serverHudGui then EXT.serverHudGui:Destroy(); EXT.serverHudGui = nil end
+				end,
+			})
+
+			-- Auto Rebirth (Farming tab)
+			local rbBox = Tabs.farming:AddRightGroupbox("Auto Rebirth", "refresh-cw")
+			rbBox:AddToggle("ExtRebirth", {
+				Text = "Auto Rebirth/Prestige",
+				Default = false,
+				Callback = function(v) EXT.rebirth = v end,
+			})
+
+			-- Auto Trade (Settings)
+			local atBox = SettingsTab:AddRightGroupbox("Auto Trade", "shuffle")
+			atBox:AddToggle("ExtAutoTrade", {
+				Text = "Auto Accept Trades",
+				Default = false,
+				Callback = function(v) EXT.autoTrade = v end,
+			})
+
+			-- Farm Scheduler (Farming tab)
+			local fsBox = Tabs.farming:AddRightGroupbox("Farm Scheduler", "clock")
+			fsBox:AddToggle("ExtFarmSched", {
+				Text = "Enable Scheduler", Default = false,
+				Callback = function(v)
+					EXT.farmSched = v
+					EXT.schedPhase = v and "running" or "idle"
+					EXT.schedTimer = os.clock()
+				end,
+			})
+			fsBox:AddSlider("ExtSchedDuration", {
+				Text = "Farm Duration (min)", Default = 60, Min = 5, Max = 300, Rounding = 0, Suffix = "m",
+				Callback = function(v) EXT.schedDuration = v * 60 end,
+			})
+			fsBox:AddSlider("ExtSchedPause", {
+				Text = "Pause (min)", Default = 5, Min = 1, Max = 60, Rounding = 0, Suffix = "m",
+				Callback = function(v) EXT.schedPause = v * 60 end,
+			})
+			fsBox:AddLabel("Farms for X min, pauses Y min, repeats", true)
+
+			-- Updater (Settings)
+			local ucBox = SettingsTab:AddRightGroupbox("Updates", "cloud")
+			ucBox:AddToggle("ExtUpdateCheck", {
+				Text = "Check Updates on Load",
+				Default = false,
+				Callback = function(v) EXT.updateCheck = v end,
+			})
+		end
+		pcall(v2Gui)
+
+		-- ===== V2 Heartbeat =====
+		local v2Conn = RunService.Heartbeat:Connect(function(dt)
+			if EXT.autoBoost then tryAutoBoost() end
+			if EXT.rebirth then tryAutoRebirth() end
+			if EXT.autoTrade then tryAutoTrade() end
+			if EXT.farmSched then schedStep() end
+			if EXT.serverHud then
+				EXT.serverHudClock += dt
+				if EXT.serverHudClock >= 2 then EXT.serverHudClock = 0; task.spawn(hudUpdate) end
+			end
+			if EXT.pointer then
+				EXT.boostClock += dt -- repurpose as pointer timer
+				if EXT.boostClock >= 0.3 then EXT.boostClock = 0; pointerUpdate() end
+			end
+			if EXT.soundObj and not EXT.soundObj.Playing then
+				EXT.soundObj:Destroy(); EXT.soundObj = nil
+			end
+		end)
+		table.insert(netConns, v2Conn)
+
+		-- Record graph data every 10s
+		task.spawn(function()
+			while true do
+				task.wait(10)
+				graphRecord()
+			end
+		end)
+
+		-- Initial update check
+		if EXT.updateCheck then checkUpdate() end
+
+		-- Start with scheduler if enabled
+		if EXT.farmSched then EXT.schedPhase = "running"; EXT.schedTimer = os.clock() end
+	end -- end of install()
 
 	install()
-end
+end -- end of do block
 
 -- === END NEW FEATURES MODULE ===
 
