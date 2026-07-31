@@ -273,11 +273,14 @@ local tpState
 local sweepAccumulator = math.huge
 local statsDirty = true
 
--- One-hit: spoof the strongest pickaxe name on the dig remote
-local oneHit = false
-local oneHitName = "The Terminus"
+-- One-hit: spoof the strongest pickaxe name on the dig remote.
+-- digName is global (not local) on purpose: the Farm/Money install()
+-- functions sit right at Luau's 200-register limit, and an extra
+-- captured local tips them over the edge (CompileError).
+oneHit = false
+oneHitName = "The Terminus"
 
-local function digName(tool)
+function digName(tool)
 	return oneHit and oneHitName or (tool and tool.Name or "")
 end
 
