@@ -5341,7 +5341,14 @@ do
 
 			return pcall(function()
 				for step = 0, DIG_BURST - 1 do
-					event:FireServer(name, aim - Vector3.new(0, step * DIG_SINK, 0))
+					if direct then
+						-- hit the crystal itself; never sink below it, or the ground
+						-- under it gets dug out and the crystal falls forever
+						local lift = (step % 3) * 0.5
+						event:FireServer(name, aim + Vector3.new(0, lift, 0))
+					else
+						event:FireServer(name, aim - Vector3.new(0, step * DIG_SINK, 0))
+					end
 				end
 			end)
 		end
@@ -5587,22 +5594,16 @@ do
 
 				holdAt(CFrame.new(spot + Vector3.new(0, COLLECT_LIFT, 0), spot), spot)
 
-				local digSpot = spot
-
-				if not lootHp or lootHp <= 0 then
-					local ground = surfaceAt(spot.X, spot.Z)
-
-					if ground then
-						digSpot = ground
-					end
-				end
-
 				requestStream(spot)
 
-				if canSwing then
-					swingClock -= swingNeed
-					-- direct aim while the crystal is still intact (embedded below surface)
-					swing(digSpot, lootHp and lootHp > 0)
+				-- Swing only while the crystal is still intact. Never dig below a
+				-- crystal: that digs out the ground under it and it falls forever,
+				-- so it can never be picked up.
+				if lootHp and lootHp > 0 then
+					if canSwing then
+						swingClock -= swingNeed
+						swing(spot, true)
+					end
 				end
 
 				if now - grabClock >= GRAB_GAP then
