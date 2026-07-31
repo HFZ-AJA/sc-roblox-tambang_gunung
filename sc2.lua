@@ -5059,9 +5059,6 @@ do
 		local DIG_REACH = 12
 		local DIG_REFRESH = 5
 		local COLLECT_RANGE = 32000
-		local DROP_WINDOW = 24
-		local DROP_HOLD = 2
-		local COLUMN_DEPTH = 200
 		local COLLECT_LIFT = 5
 		local COLLECT_GAP = 0.15
 		local GRAB_GAP = 0.05
@@ -5170,8 +5167,6 @@ do
 		local grabClock = 0
 		local lootHp
 		local lootMax
-		local lootSince = 0
-		local lootSkipped = {}
 		local target
 		local columnY
 		local columnDry = 0
@@ -5194,8 +5189,6 @@ do
 		local depletedCells = {}
 		local lastPickupTime = os.clock()
 		local crystalDrought = 0
-		local digHoldUntil = 0
-		local columnStartY
 
 		local function toggleValue(name)
 			local store = Library and Library.Toggles
@@ -5327,7 +5320,7 @@ do
 			return Move.glide(goal, aim)
 		end
 
-		local function swing(spot, direct)
+		local function swing(spot)
 			local event = Farm.digEvent()
 			if not event or not heldPick then
 				return false
@@ -5337,51 +5330,15 @@ do
 			local root = getRoot()
 			local aim = spot
 
-			-- direct: fire at the exact position. While digging down, embedded
-			-- crystals sit below the terrain surface, so aimPoint's raycast hits
-			-- terrain first and the crystal never breaks.
-			if not direct and root then
+			if root then
 				aim = aimPoint(root.Position, spot, pickReach(heldPick), os.clock()) or spot
 			end
 
 			return pcall(function()
 				for step = 0, DIG_BURST - 1 do
-					if direct then
-						-- hit the crystal itself; never sink below it, or the ground
-						-- under it gets dug out and the crystal falls forever
-						local lift = (step % 3) * 0.5
-						event:FireServer(name, aim + Vector3.new(0, lift, 0))
-					else
-						event:FireServer(name, aim - Vector3.new(0, step * DIG_SINK, 0))
-					end
+					event:FireServer(name, aim - Vector3.new(0, step * DIG_SINK, 0))
 				end
 			end)
-		end
-
-		local function partMoving(inst)
-			local ok, velocity = pcall(function()
-				return inst.AssemblyLinearVelocity
-			end)
-			if ok and typeof(velocity) == "Vector3" and velocity.Magnitude > 1 then
-				return true
-			end
-			return false
-		end
-
-		local function crystalDroppingBelow(origin, radius)
-			local hits = nearbyCrystalParts(origin, radius)
-			if not hits then
-				return false
-			end
-
-			for _, part in ipairs(hits) do
-				if part.Parent and isCrystal(part) and getAttr(part, "Collected") ~= true
-					and part.Position.Y < origin.Y and partMoving(part) then
-					return true
-				end
-			end
-
-			return false
 		end
 
 		local function bagRatio()
@@ -5403,10 +5360,6 @@ do
 					return
 				end
 				seen[inst] = true
-
-				if lootSkipped[inst] then
-					return
-				end
 
 				if not inst.Parent or not isCrystal(inst) or getAttr(inst, "Collected") == true then
 					return
@@ -5465,8 +5418,6 @@ do
 			active = false
 			target = nil
 			columnY = nil
-			columnStartY = nil
-			digHoldUntil = 0
 			loaded = false
 			Move.glideStop()
 			scanIndex = 0
@@ -5479,13 +5430,11 @@ do
 			heldPick = nil
 			statusText = "Idle"
 			barrenCycles = 0
-			barrenWarpClock = 0
 			targetSwings = 0
 			crystalDrought = 0
 			lastPickupTime = os.clock()
 			table.clear(minedYSet)
 			table.clear(depletedCells)
-			table.clear(lootSkipped)
 
 			Move.setFly(toggleValue("Fly"))
 			Move.setNoclip(toggleValue("Noclip"))
@@ -5555,11 +5504,6 @@ do
 
 			pickupStep()
 
-			-- Keep drought clock in sync: pickupStep uses its own lastPickup stamp
-			if lastPickup > lastPickupTime then
-				lastPickupTime = lastPickup
-			end
-
 			if heldPick == nil or heldPick.Parent ~= LocalPlayer.Character then
 				equipClock = 0
 				heldPick = Farm.equipPick()
@@ -5595,22 +5539,6 @@ do
 					lootMax = hp
 				end
 
-				-- Refresh progress stamp while HP drops; abandon a crystal we can't
-				-- break (e.g. pickaxe too weak) instead of locking onto it forever
-				if not lootHp or (hp and hp < lootHp) then
-					lootSince = now
-				elseif partMoving(loot) then
-					-- still falling: keep waiting for it to settle
-					lootSince = now
-				elseif now - lootSince > 12 then
-					lootSkipped[loot] = true
-					loot = nil
-					lootHp = nil
-					lootMax = nil
-					statusText = "Skipping unbreakable crystal"
-					return
-				end
-
 				lootHp = hp
 			end
 
@@ -5621,34 +5549,29 @@ do
 				if loot then
 					lootHp = tonumber(getAttr(loot, "MinedHP"))
 					lootMax = lootHp
-					lootSince = now
 				end
 			end
 
 			if loot then
 				local spot = loot.Position
 
-				-- Top-crystal mode: teleport straight to far crystals instead of
-				-- gliding across the map.
-				if (spot - root.Position).Magnitude > PICK.range + 1 then
-					requestStream(spot)
-					teleportTo(loot)
-					statusText = "TP to top crystal"
-					return
-				end
-
 				holdAt(CFrame.new(spot + Vector3.new(0, COLLECT_LIFT, 0), spot), spot)
+
+				local digSpot = spot
+
+				if not lootHp or lootHp <= 0 then
+					local ground = surfaceAt(spot.X, spot.Z)
+
+					if ground then
+						digSpot = ground
+					end
+				end
 
 				requestStream(spot)
 
-				-- Swing only while the crystal is still intact. Never dig below a
-				-- crystal: that digs out the ground under it and it falls forever,
-				-- so it can never be picked up.
-				if lootHp and lootHp > 0 then
-					if canSwing then
-						swingClock -= swingNeed
-						swing(spot, true)
-					end
+				if canSwing then
+					swingClock -= swingNeed
+					swing(digSpot)
 				end
 
 				if now - grabClock >= GRAB_GAP then
@@ -5674,12 +5597,6 @@ do
 				return
 			end
 
-			-- Top-crystal-only mode: never drill columns. Keep scanning so newly
-			-- spawned crystals are found and collected.
-			requestStream(root.Position)
-			statusText = "Searching top crystal..."
-			return
-
 			local origin = farmOrigin(root)
 
 			if target and now - surfaceClock >= SURFACE_GAP then
@@ -5703,25 +5620,6 @@ do
 					task.wait(0.3)
 					return
 				else
-					-- Depth cap: stop drilling once the column falls far below where
-					-- it started. Crystals drop out of reach when we dig too deep
-					-- too fast, and the farm ends up spam-digging into the void.
-					if columnStartY and spot.Y < columnStartY - COLUMN_DEPTH then
-						local cellKey = string.format("%d,%d", math.floor(spot.X / 20), math.floor(spot.Z / 20))
-						depletedCells[cellKey] = true
-						target = nil
-						columnY = nil
-						columnDry = 0
-						columnSwings = 0
-						targetSwings = 0
-						local ms = mountainSpot() or origin
-						local drift = ms + Vector3.new(math.random(-80, 80), 20, math.random(-80, 80))
-						teleportTo(drift)
-						statusText = "Column too deep, moving..."
-						task.wait(0.3)
-						return
-					end
-
 					if not columnY or spot.Y < columnY - 0.05 then
 						columnDry = 0
 					else
@@ -5769,31 +5667,21 @@ do
 				if not spot then
 					barrenCycles += 1
 
-					if barrenCycles == 1 then
-						barrenWarpClock = now
-					end
-
-					-- Persistent barrenness (>= 12 cycles over >= 20s): hop server
-					if barrenCycles >= 12 and now - barrenWarpClock >= 20 then
-						Library:Notify("Mountain depleted, hopping server", 3)
-						Net.hop()
-						stop()
+					if barrenCycles >= 5 then
+						local ms = mountainSpot() or origin
+						local warpPos = ms + Vector3.new(math.random(-120, 120), 30, math.random(-120, 120))
+						teleportTo(warpPos)
+						requestStream(warpPos)
+						statusText = "No surface, warping..."
+						task.wait(0.5)
+						barrenCycles = 0
 						return
 					end
 
-					if barrenCycles >= 5 then
-						-- Throttle warps to every 3s instead of spamming each frame
-						if now - barrenWarpClock >= 3 then
-							local ms = mountainSpot() or origin
-							local warpPos = ms + Vector3.new(math.random(-120, 120), 30, math.random(-120, 120))
-							teleportTo(warpPos)
-							requestStream(warpPos)
-							statusText = "No surface, warping..."
-							task.wait(0.5)
-						else
-							requestStream(origin)
-							statusText = "Searching surface..."
-						end
+					if barrenCycles >= 12 then
+						Library:Notify("Mountain depleted, hopping server", 3)
+						Net.hop()
+						stop()
 						return
 					end
 
@@ -5823,7 +5711,6 @@ do
 
 				target = spot
 				columnY = spot.Y
-				columnStartY = spot.Y
 				columnDry = 0
 				columnSwings = 0
 				targetSwings = 0
@@ -5847,21 +5734,6 @@ do
 
 			holdAt(CFrame.new(target + Vector3.new(0, DIG_LIFT, 0), target), target)
 
-			-- Let dropping crystals land and get picked before digging deeper.
-			-- Digging below falling crystals makes them drop forever.
-			if crystalDroppingBelow(root.Position, DROP_WINDOW) then
-				if digHoldUntil == 0 then
-					digHoldUntil = now + DROP_HOLD
-				end
-			elseif now >= digHoldUntil then
-				digHoldUntil = 0
-			end
-
-			if now < digHoldUntil then
-				statusText = "Waiting for crystals..."
-				return
-			end
-
 			if canSwing then
 				swingClock -= swingNeed
 				columnSwings += 1
@@ -5881,15 +5753,13 @@ do
 			active = true
 			target = nil
 			columnY = nil
-			columnStartY = nil
-			digHoldUntil = 0
 			columnDry = 0
 			columnSwings = 0
 			surfaceClock = 0
 			peakClock = 0
 			scanIndex = 0
 			scanUntil = 0
-			loaded = true
+			loaded = false
 			loot = nil
 			lootClock = 0
 			lootHp = nil
@@ -5902,13 +5772,11 @@ do
 			heldPick = nil
 			statusText = "Starting"
 			barrenCycles = 0
-			barrenWarpClock = 0
 			targetSwings = 0
 			crystalDrought = 0
 			lastPickupTime = os.clock()
 			table.clear(minedYSet)
 			table.clear(depletedCells)
-			table.clear(lootSkipped)
 
 			Move.setFly(false)
 			Move.setNoclip(true)
