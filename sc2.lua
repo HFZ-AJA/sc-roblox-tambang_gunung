@@ -5352,67 +5352,31 @@ do
 		end
 
 		local function findLoot(free, origin)
-			local best, bestValue, bestDistance
-			local blocked = false
-			local seen = {}
-
+			local best, bestDist
 			local function consider(inst)
-				if not inst or seen[inst] then
-					return
-				end
-				seen[inst] = true
-
-				if not inst.Parent or not isCrystal(inst) or getAttr(inst, "Collected") == true then
-					return
-				end
-
+				if not inst or not inst.Parent or not isCrystal(inst) then return end
+				if getAttr(inst, "Collected") == true then return end
 				local value = crystalValue(inst)
-				if not meetsFilter(inst, value) then
-					return
-				end
-
-				local distance = (inst.Position - origin).Magnitude
-				if distance > COLLECT_RANGE then
-					return
-				end
-
-				if crystalWeight(inst) > free then
-					blocked = true
-					return
-				end
-
-				local better = not best or value > bestValue
-
-				if not better and value == bestValue and distance < bestDistance then
-					better = true
-				end
-
-				if better then
-					best = inst
-					bestValue = value
-					bestDistance = distance
-				end
+				if not meetsFilter(inst, value) then return end
+				local w = crystalWeight(inst)
+				if w > free then return end
+				local dist = (inst.Position - origin).Magnitude
+				if dist > COLLECT_RANGE then return end
+				if not best or dist < bestDist then best = inst; bestDist = dist end
 			end
-
-			eachContainer(function(container)
-				for _, child in ipairs(container:GetChildren()) do
-					if child:IsA("BasePart") then
-						consider(child)
-					elseif child:IsA("Model") then
-						for _, inner in ipairs(child:GetChildren()) do
-							if inner:IsA("BasePart") then
-								consider(inner)
-							end
+			-- Check registry (ESP-tracked) first — fastest
+			for inst in pairs(registry) do consider(inst) end
+			if not best then
+				eachContainer(function(container)
+					for _, child in ipairs(container:GetChildren()) do
+						if child:IsA("BasePart") then consider(child)
+						elseif child:IsA("Model") then
+							for _, inner in ipairs(child:GetChildren()) do consider(inner) end
 						end
 					end
-				end
-			end)
-
-			for inst in pairs(registry) do
-				consider(inst)
+				end)
 			end
-
-			return best, blocked
+			return best
 		end
 
 		local function stop()
@@ -5450,301 +5414,138 @@ do
 			end
 
 			local now = os.clock()
+			local free = backpackFree()
+			local origin = root.Position
 
+			-- 1. Load terrain first pass (keep existing)
 			if not loaded then
-				if scanIndex == 0 then
-					scanIndex = 1
-					scanUntil = now + SCAN_HOLD
-				end
-
+				if scanIndex == 0 then scanIndex = 1; scanUntil = now + SCAN_HOLD end
 				local spots = moneyDynamicSpots()
 				if scanIndex <= #spots then
 					holdAt(spots[scanIndex])
 					statusText = string.format("Loading terrain %d/%d", scanIndex, #spots)
-
-					if now >= scanUntil then
-						scanIndex += 1
-						scanUntil = now + SCAN_HOLD
-					end
-
+					if now >= scanUntil then scanIndex += 1; scanUntil = now + SCAN_HOLD end
 					return
 				end
-
 				loaded = true
-				peakClock = 0
 			end
 
+			-- 2. Auto-sell at threshold
 			if sellUntil > 0 then
-				if now < sellUntil then
-					statusText = "Selling"
-					return
-				end
-
+				if now < sellUntil then statusText = "Selling"; return end
 				sellUntil = 0
-
-				if sellSpot then
-					applyPivot(sellSpot)
-					sellSpot = nil
-				end
-
-				target = nil
-				columnY = nil
-				surfaceClock = 0
+				if sellSpot then applyPivot(sellSpot); sellSpot = nil end
+				loot = nil
+				lootHp = nil
+			end
+			if autoSell and bagRatio() >= SELL_MARK then
+				sellSpot = CFrame.new(root.Position)
+				if doSell() then sellUntil = now + SELL_WAIT; statusText = "Selling"; return end
 			end
 
-			if autoSell and (bagRatio() >= SELL_MARK or lootBlocked) then
-				sellSpot = root.CFrame
-
-				if doSell() then
-					lootBlocked = false
-					sellUntil = now + SELL_WAIT
-					statusText = "Selling"
-					return
-				end
-			end
-
+			-- 3. Auto-pickup nearby loose crystals (always)
 			if pickupStep() then
 				lastPickupTime = now
+				crystalDrought = 0
 			end
 
+			-- 4. Keep best pickaxe equipped
 			if heldPick == nil or heldPick.Parent ~= LocalPlayer.Character then
-				equipClock = 0
 				heldPick = Farm.equipPick()
 			else
 				equipClock += deltaTime
-				if equipClock >= EQUIP_STEP then
-					equipClock = 0
-					heldPick = Farm.equipPick() or heldPick
-				end
-			end
-
-			if not heldPick then
-				statusText = "No pickaxe"
-				return
+				if equipClock >= EQUIP_STEP then equipClock = 0; heldPick = Farm.equipPick() or heldPick end
 			end
 
 			swingClock += deltaTime
-
-			local swingNeed = math.max(0.02, Farm.swingGap(heldPick) * 0.4)
+			local swingNeed = math.max(0.02, (heldPick and Farm.swingGap(heldPick) or 0.04) * 0.35)
 			local canSwing = swingClock >= swingNeed
-			local free = backpackFree()
 
-			if loot and (not loot.Parent or getAttr(loot, "Collected") == true) then
-				loot = nil
-				lootHp = nil
-				lootMax = nil
+			-- 5. Clear dead loot reference
+			if loot and (not loot.Parent or getAttr(loot, "Collected") == true) then loot = nil; lootHp = nil end
+
+			-- 6. CRYSTAL-FIRST: find nearest uncollected crystal from registry
+			if not loot then
+				loot = findLoot(free, origin)
+				if loot then lootHp = tonumber(getAttr(loot, "MinedHP")) end
 			end
 
-			if loot then
-				local hp = tonumber(getAttr(loot, "MinedHP"))
-
-				if hp and (lootMax == nil or hp > lootMax) then
-					lootMax = hp
-				end
-
-				lootHp = hp
-			end
-
-			if not loot and now - lootClock >= COLLECT_GAP then
-				lootClock = now
-				loot, lootBlocked = findLoot(free, root.Position)
-
-				if loot then
-					lootHp = tonumber(getAttr(loot, "MinedHP"))
-					lootMax = lootHp
-				end
-			end
-
+			-- 7. If we have a target crystal — go to it, break it, grab it
 			if loot then
 				local spot = loot.Position
-
-				holdAt(CFrame.new(spot + Vector3.new(0, COLLECT_LIFT, 0), spot), spot)
-
-				local digSpot = spot
-
-				if not lootHp or lootHp <= 0 then
-					local ground = surfaceAt(spot.X, spot.Z)
-
-					if ground then
-						digSpot = ground
-					end
-				end
-
 				requestStream(spot)
 
-				if canSwing then
-					swingClock -= swingNeed
-					swing(digSpot)
-				end
+				-- Hold at optimal digging range above the crystal
+				local lift = (lootHp and lootHp > 0) and 3 or COLLECT_LIFT
+				holdAt(CFrame.new(spot + Vector3.new(0, lift, 0), spot), spot)
 
-				if now - grabClock >= GRAB_GAP then
-					grabClock = now
-					if grabCrystal(loot, crystalPrompt(loot)) then
-						lastPickupTime = now
-						crystalDrought = 0
-					end
-				end
-
+				-- Break if it has HP
 				if lootHp and lootHp > 0 then
-					local ratio = 0
-
-					if lootMax and lootMax > 0 then
-						ratio = math.clamp(1 - lootHp / lootMax, 0, 1)
+					if canSwing then
+						swingClock -= swingNeed
+						swing(loot)
 					end
-
-					statusText = string.format("Breaking crystal %d%%", math.floor(ratio * 100))
+					statusText = string.format("Breaking %s  %dhp", crystalRarity(loot), lootHp)
 				else
-					statusText = "Collecting crystals"
+					-- No HP left or no MinedHP — grab it
+					swingClock -= swingNeed
+					swing(spot + Vector3.new(0, -1, 0))
+					if now - grabClock >= GRAB_GAP then
+						grabClock = now
+						if grabCrystal(loot, crystalPrompt(loot)) then
+							lastPickupTime = now
+							crystalDrought = 0
+							loot = nil
+						end
+					end
+					statusText = "Collecting crystal"
 				end
-
 				return
 			end
 
-			local origin = farmOrigin(root)
-
-			if target and now - surfaceClock >= SURFACE_GAP then
+			-- 8. No crystal found → mine terrain surface to reveal more
+			if not target or (now - surfaceClock >= SURFACE_GAP) then
 				surfaceClock = now
-
-				local spot = surfaceAt(target.X, target.Z)
-
-				if not spot then
-					-- Surface gone — mark depleted & warp
-					local cellKey = string.format("%d,%d", math.floor(target.X / 20), math.floor(target.Z / 20))
-					depletedCells[cellKey] = true
-					target = nil
-					columnY = nil
-					columnDry = 0
-					columnSwings = 0
-					targetSwings = 0
-					local ms = mountainSpot() or origin
-					local drift = ms + Vector3.new(math.random(-80, 80), 20, math.random(-80, 80))
-					teleportTo(drift)
-					statusText = "Surface gone, warping..."
-					task.wait(0.3)
-					return
+				local spot
+				-- Try pickTarget first, then surfaceAt player position
+				if not target then
+					spot = pickTarget(origin, now) or surfaceAt(origin.X, origin.Z)
 				else
-					if not columnY or spot.Y < columnY - 0.05 then
-						columnDry = 0
-					else
-						columnDry += columnSwings
-					end
-
-					columnSwings = 0
-					columnY = spot.Y
-					target = spot
-
-					-- Total swing cap: if we've swung 200+ times at this target, it's depleted
-					if targetSwings >= 200 then
-						local cellKey = string.format("%d,%d", math.floor(spot.X / 20), math.floor(spot.Z / 20))
-						depletedCells[cellKey] = true
-						target = nil; columnY = nil; columnDry = 0; columnSwings = 0; targetSwings = 0
-						local ms = mountainSpot() or origin
-						local drift = ms + Vector3.new(math.random(-80, 80), 20, math.random(-80, 80))
-						teleportTo(drift)
-						statusText = "Column depleted, moving..."
-						task.wait(0.3)
-						return
-					end
-
-					if columnDry >= COLUMN_DRY then
-						local consumed = math.floor(spot.Y / 10) * 10
-						minedYSet[consumed] = true
-						target = nil; columnY = nil; columnDry = 0; columnSwings = 0; targetSwings = 0
-						local ms = mountainSpot() or origin
-						local drift = ms + Vector3.new(math.random(-60, 60), math.random(20, 80), math.random(-60, 60))
-						teleportTo(drift)
-						statusText = "Column dry, moving..."
-						task.wait(0.3)
-						return
-					end
-				end
-			end
-
-			if not target then
-				local spot = pickTarget(origin, now)
-
-				if not spot then
-					spot = surfaceAt(origin.X, origin.Z)
+					spot = surfaceAt(target.X, target.Z) or pickTarget(origin, now) or surfaceAt(origin.X, origin.Z)
 				end
 
 				if not spot then
 					barrenCycles += 1
-
-					if barrenCycles >= 5 then
-						local ms = mountainSpot() or origin
-						local warpPos = ms + Vector3.new(math.random(-120, 120), 30, math.random(-120, 120))
-						teleportTo(warpPos)
-						requestStream(warpPos)
-						statusText = "No surface, warping..."
-						task.wait(0.5)
-						barrenCycles = 0
-						return
+					if barrenCycles >= 8 then
+						Library:Notify("Mountain depleted, hopping", 3)
+						Net.hop(); stop(); return
 					end
-
-					if barrenCycles >= 12 then
-						Library:Notify("Mountain depleted, hopping server", 3)
-						Net.hop()
-						stop()
-						return
-					end
-
-					requestStream(origin)
 					local ms = mountainSpot() or origin
-					local drift = ms + Vector3.new(math.random(-60, 60), 30, math.random(-60, 60))
-					teleportTo(drift)
-					statusText = "Searching surface..."
-					return
+					local drift = ms + Vector3.new(math.random(-80, 80), 30, math.random(-80, 80))
+					teleportTo(drift); requestStream(drift)
+					statusText = "Searching surface..."; return
 				end
-
 				barrenCycles = 0
-
-				-- Skip this cell if already depleted
-				local cellKey = string.format("%d,%d", math.floor(spot.X / 20), math.floor(spot.Z / 20))
-				if depletedCells[cellKey] then
-					target = nil
-					statusText = "Skipping depleted cell..."
-					task.wait(0.2)
-					return
-				end
-
-				if columnY then
-					local yKey = math.floor(columnY / 10) * 10
-					minedYSet[yKey] = true
-				end
-
 				target = spot
-				columnY = spot.Y
-				columnDry = 0
-				columnSwings = 0
-				targetSwings = 0
-				surfaceClock = now
 			end
 
-			-- Crystal drought detection: if mining 20s+ without pickup, spot is dry
+			-- Drought: if 15s without pickup, move
 			crystalDrought = now - lastPickupTime
-			if crystalDrought >= 20 and targetSwings > 5 then
-				local cellKey = string.format("%d,%d", math.floor(target.X / 20), math.floor(target.Z / 20))
-				depletedCells[cellKey] = true
-				target = nil; columnY = nil; columnDry = 0; columnSwings = 0; targetSwings = 0; crystalDrought = 0
+			if crystalDrought >= 15 then
 				lastPickupTime = now
 				local ms = mountainSpot() or origin
-				local drift = ms + Vector3.new(math.random(-80, 80), 20, math.random(-80, 80))
+				local drift = ms + Vector3.new(math.random(-100, 100), 20, math.random(-100, 100))
 				teleportTo(drift)
-				statusText = "No crystals for 20s, moving..."
-				task.wait(0.3)
-				return
+				statusText = "Moving to fresh spot..."; return
 			end
 
+			-- Mine the terrain surface
 			holdAt(CFrame.new(target + Vector3.new(0, DIG_LIFT, 0), target), target)
-
 			if canSwing then
 				swingClock -= swingNeed
-				columnSwings += 1
-				targetSwings += 1
 				swing(target)
 			end
-
-			statusText = string.format("Mining surface at %dm", math.floor(target.Y))
+			statusText = string.format("Mining %dm", math.floor(target.Y))
 		end
 
 		local function setActive(value)
@@ -5788,7 +5589,7 @@ do
 
 		local MoneyBox = Tabs.farming:AddRightGroupbox("Money Farm", "banknote")
 
-		MoneyBox:AddLabel("Loads the mountain and digs from the peak downwards", true)
+		MoneyBox:AddLabel("Crystal-targeting farm — breaks then collects nearest crystal. Falls back to surface mining when empty.", true)
 		MoneyBox:AddDivider()
 
 		MoneyBox:AddToggle("AutoFarmMoney", {
