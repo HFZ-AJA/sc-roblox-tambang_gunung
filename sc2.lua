@@ -5067,7 +5067,7 @@ do
 		local SELL_WAIT = 7
 		local DIG_REACH = 12
 		local DIG_REFRESH = 5
-		local COLLECT_RANGE = 32000
+		local COLLECT_RANGE = 200
 		local COLLECT_LIFT = 5
 		local COLLECT_GAP = 0.15
 		local GRAB_GAP = 0.05
@@ -5329,7 +5329,7 @@ do
 			return Move.glide(goal, aim)
 		end
 
-		local function swing(spot)
+		local function swing(spot, burst)
 			local event = Farm.digEvent()
 			if not event or not heldPick then
 				return false
@@ -5344,16 +5344,17 @@ do
 			end
 
 			return pcall(function()
-				if oneHit then
-					-- One-hit: burst all swings at the same point so the
-					-- total damage exceeds crystal HP with any pickaxe.
+				if oneHit and burst then
+					-- One-hit on a loot crystal: concentrate all swings on it.
 					for _ = 1, PICK.oneHitBurst do
 						event:FireServer(name, aim)
 					end
 					return
 				end
 
-				for step = 0, DIG_BURST - 1 do
+				-- Surface digging: never drill straight down.
+				local depth = oneHit and 1 or DIG_BURST
+				for step = 0, depth - 1 do
 					event:FireServer(name, aim - Vector3.new(0, step * DIG_SINK, 0))
 				end
 			end)
@@ -5398,9 +5399,9 @@ do
 					return
 				end
 
-				local better = not best or value > bestValue
+				local better = not best or distance < bestDistance
 
-				if not better and value == bestValue and distance < bestDistance then
+				if not better and distance == bestDistance and value > bestValue then
 					better = true
 				end
 
@@ -5591,7 +5592,7 @@ do
 
 				if canSwing then
 					swingClock -= swingNeed
-					swing(digSpot)
+					swing(digSpot, true)
 				end
 
 				if now - grabClock >= GRAB_GAP then
