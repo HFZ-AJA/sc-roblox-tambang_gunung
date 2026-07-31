@@ -4997,7 +4997,7 @@ do
 		local DIG_SLACK = 1.5
 		local DIG_AIM = 0.999
 		local EQUIP_STEP = 1
-		local SELL_MARK = 0.2
+		local SELL_MARK = 0.7
 		local SELL_WAIT = 1.5
 		local DIG_REACH = 12
 		local DIG_REFRESH = 5
@@ -5383,98 +5383,78 @@ do
 			local now = os.clock()
 			local origin = root.Position
 
-			-- Rate timers (global to this closure via upvalues)
+			-- Rate timers
 			swingClock += deltaTime
 			equipClock += deltaTime
-			lootClock += deltaTime
-			scanIndex += deltaTime  -- repurpose as scan timer
+			scanIndex += deltaTime
 
-			-- 1. Auto-sell when bag >= threshold
-			if autoSell and bagRatio() >= SELL_MARK then
+			-- ========================================================
+			-- PHASE 1: Sell only when truly full (70%+)
+			if autoSell then
 				if sellUntil > 0 then
 					if now < sellUntil then statusText = "Selling..."; return end
 					sellUntil = 0
-					if sellSpot then applyPivot(sellSpot); sellSpot = nil end
-				else
-					sellSpot = CFrame.new(root.Position)
-					if doSell() then sellUntil = now + SELL_WAIT; statusText = "Selling"; return end
+					loot = nil
+					return  -- one frame cooldown after sell
+				end
+				if bagRatio() >= SELL_MARK then
+					sellUntil = now + SELL_WAIT
+					doSell()
+					statusText = "Selling..."; return
 				end
 			end
 
-			-- 2. Pick up loose crystals every heartbeat
+			-- ========================================================
+			-- PHASE 2: Pick up any loose crystals nearby
 			pickupStep()
 
-			-- 3. Equip best pickaxe every 1s
-			if equipClock >= 1 then
+			-- ========================================================
+			-- PHASE 3: Equip best pickaxe every 2s
+			if equipClock >= 2 then
 				equipClock = 0
-				heldPick = Farm.equipPick() or heldPick
-				if heldPick and heldPick.Parent ~= LocalPlayer.Character then
-					heldPick = Farm.equipPick()
-				end
+				heldPick = Farm.equipPick()
 			end
-
 			if not heldPick then
 				heldPick = Farm.equipPick()
 				if not heldPick then statusText = "No pickaxe"; return end
 			end
 
-			-- 4. Clear dead loot ref
+			-- ========================================================
+			-- PHASE 4: Clear dead target, scan for crystals every 1s
 			if loot and (not loot.Parent or getAttr(loot, "Collected") == true) then loot = nil end
 
-			-- 5. Scan for crystals every 0.5s
-			if not loot and scanIndex >= 0.5 then
+			if not loot and scanIndex >= 1 then
 				scanIndex = 0
 				local all = findAllCrystals()
 				if #all > 0 then loot = all[1].inst end
 			end
 
-			-- 6. CRYSTAL TARGET: move close → break → grab
+			-- ========================================================
+			-- PHASE 5: Crystal target — break then grab
 			if loot then
 				local spot = loot.Position
 				local dist = (spot - origin).Magnitude
 
-				-- Teleport if far (rate-limited: only when > 15 studs, not every frame)
-				if dist > 15 then
-					teleportTo(spot + Vector3.new(0, 3, 0))
-					requestStream(spot)
+				-- TP with cooldown (only 1 TP per 8 frames)
+				if dist > 20 then
+					if teleportTo(spot + Vector3.new(0, 3, 0)) then
+						requestStream(spot)
+					end
 					statusText = string.format("TP to %s", crystalRarity(loot))
 					return
 				end
 
-				local hp = tonumber(getAttr(loot, "MinedHP")) or 0
+				local hp = getAttr(loot, "MinedHP")
 
-				if hp > 0 then
-					-- Swing with cooldown
-					if swingClock >= 0.08 then
+				if tonumber(hp) and tonumber(hp) > 0 then
+					-- Break
+					if swingClock >= 0.12 then
 						swingClock = 0
-						local event = Farm.digEvent()
-						if event and heldPick then
-							local aim = spot
-							local r2 = getRoot()
-							if r2 then
-								aim = aimPoint(r2.Position, spot, pickReach(heldPick), now) or spot
-							end
-							pcall(function()
-								for i = 0, DIG_BURST * 2 do
-									event:FireServer(heldPick.Name, aim - Vector3.new(0, math.floor(i/2) * DIG_SINK, 0))
-								end
-							end)
-						end
+						swing(spot)
 					end
-					statusText = string.format("Breaking %s  %dhp", crystalRarity(loot), hp)
+					statusText = string.format("Breaking %s %dhp", crystalRarity(loot), hp)
 				else
-					-- Grab — no more swinging needed
-					if swingClock >= 0.05 then
-						swingClock = 0
-						local event = Farm.digEvent()
-						if event and heldPick then
-							pcall(function()
-								for i = 0, 6 do
-									event:FireServer(heldPick.Name, spot - Vector3.new(0, i, 0))
-								end
-							end)
-						end
-					end
+					-- Grab
 					if grabCrystal(loot, crystalPrompt(loot)) then
 						lastPickupTime = now
 						loot = nil
@@ -5484,9 +5464,9 @@ do
 				return
 			end
 
-			-- 7. No crystal — mine surface to reveal more
+			-- ========================================================
+			-- PHASE 6: No crystal — mine surface to spawn more
 			local spot = pickTarget(origin, now) or surfaceAt(origin.X, origin.Z)
-
 			if not spot then
 				barrenCycles += 1
 				if barrenCycles >= 6 then
@@ -5494,26 +5474,24 @@ do
 					Net.hop(); stop(); return
 				end
 				local ms = mountainSpot() or origin
-				teleportTo(ms + Vector3.new(math.random(-150, 150), 50, math.random(-150, 150)))
+				teleportTo(ms + Vector3.new(math.random(-130, 130), 60, math.random(-130, 130)))
 				statusText = "Searching surface..."; return
 			end
 
 			barrenCycles = 0
 			target = spot
 
-			-- Teleport to mining spot if far
-			if (spot - origin).Magnitude > 15 then
+			if (spot - origin).Magnitude > 20 then
 				teleportTo(spot + Vector3.new(0, DIG_LIFT, 0))
-				statusText = "Moving to surface..."; return
+				statusText = "Moving..."; return
 			end
 
-			-- Mine with cooldown
-			if swingClock >= 0.06 then
+			if swingClock >= 0.12 then
 				swingClock = 0
 				local event = Farm.digEvent()
 				if event and heldPick then
 					pcall(function()
-						for i = 0, DIG_BURST do
+						for i = 0, DIG_BURST - 1 do
 							event:FireServer(heldPick.Name, spot - Vector3.new(0, i * DIG_SINK, 0))
 						end
 					end)
