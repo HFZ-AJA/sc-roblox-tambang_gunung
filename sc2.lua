@@ -274,16 +274,11 @@ local tpState
 local sweepAccumulator = math.huge
 local statsDirty = true
 
--- One-hit: spoof the strongest pickaxe name on the dig remote.
--- digName is global (not local) on purpose: the Farm/Money install()
--- functions sit right at Luau's 200-register limit, and an extra
--- captured local tips them over the edge (CompileError).
+-- One-hit: burst many swings at the same spot so the total damage
+-- exceeds crystal HP with any pickaxe. Kept global (not local): the
+-- Farm/Money install() functions sit right at Luau's 200-register
+-- limit, and an extra captured local tips them over (CompileError).
 oneHit = false
-oneHitName = "The Terminus"
-
-function digName(tool)
-	return oneHit and oneHitName or (tool and tool.Name or "")
-end
 
 -- New Features state (bundled in table to avoid local var limits)
 local EXT = {
@@ -4425,7 +4420,7 @@ do
 				return false
 			end
 
-			local name = digName(heldPick)
+			local name = heldPick.Name
 			local core = center or (part and part.Parent and part.Position)
 			local spot = core
 
@@ -5338,7 +5333,7 @@ do
 				return false
 			end
 
-			local name = digName(heldPick)
+			local name = heldPick.Name
 			local root = getRoot()
 			local aim = spot
 
@@ -5543,7 +5538,7 @@ do
 
 			swingClock += deltaTime
 
-			local swingNeed = math.max(0.02, Farm.swingGap(heldPick) * 0.4)
+			local swingNeed = math.max(oneHit and 0.1 or 0.02, Farm.swingGap(heldPick) * 0.4)
 			local canSwing = swingClock >= swingNeed
 			local free = backpackFree()
 
@@ -5861,18 +5856,7 @@ do
 			end,
 		})
 
-		OneHitBox:AddInput("ExtOneHitName", {
-			Text = "Pickaxe Name",
-			Default = "The Terminus",
-			Placeholder = "The Terminus",
-			Callback = function(value)
-				if type(value) == "string" and value ~= "" then
-					oneHitName = value
-				end
-			end,
-		})
-
-		OneHitBox:AddLabel("Sends the strongest pickaxe name even while holding any pickaxe", true)
+		OneHitBox:AddLabel("Bursts many swings at the same spot - breaks crystals with any pickaxe", true)
 	end
 
 	install()
