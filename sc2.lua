@@ -5353,6 +5353,7 @@ do
 			loaded = false
 			Move.glideStop()
 			stopFly()
+			stopShield()
 			scanIndex = 0
 			loot = nil
 			lootHp = nil
@@ -5375,6 +5376,33 @@ do
 		end
 
 		local flyBv = nil
+		local forceField = nil
+		local shieldClock = 0
+
+		local function stopShield()
+			if forceField and forceField.Parent then pcall(forceField.Destroy, forceField) end
+			forceField = nil
+		end
+
+		local function refreshShield()
+			local char = LocalPlayer.Character
+			if not char then return end
+			-- ForceField is the only server-side damage blocker in FE games
+			if not forceField or not forceField.Parent then
+				stopShield()
+				local ff = Instance.new("ForceField")
+				ff.Name = "FarmShield"
+				ff.Visible = false  -- no glow
+				ff.Parent = char
+				forceField = ff
+				-- Destroy the beam child = no visual effect at all
+				pcall(function()
+					for _, c in ipairs(ff:GetChildren()) do
+						if c:IsA("Beam") then c:Destroy() end
+					end
+				end)
+			end
+		end
 
 		local function stopFly()
 			if flyBv and flyBv.Parent then pcall(flyBv.Destroy, flyBv) end
@@ -5410,11 +5438,18 @@ do
 			swingClock += deltaTime
 			equipClock += deltaTime
 			scanIndex += deltaTime
+			shieldClock += deltaTime
 
 			-- Enable noclip while running
 			Move.setNoclip(true)
 
-			-- Anti-damage: infinite health every frame
+			-- Refresh ForceField every 4s (auto-expires ~10s)
+			if shieldClock >= 4 then
+				shieldClock = 0
+				refreshShield()
+			end
+
+			-- Anti-damage: backup health loop (client-side, helps in non-FE games)
 			local hum = root.Parent and root.Parent:FindFirstChildOfClass("Humanoid")
 			if hum then
 				hum.MaxHealth = 9e9
@@ -5424,6 +5459,14 @@ do
 					hum:SetStateEnabled(Enum.HumanoidStateType.FallingDown, false)
 					hum:SetStateEnabled(Enum.HumanoidStateType.Ragdoll, false)
 				end)
+				-- Set platform so we hover in place when not flying
+				hum.PlatformStand = false
+			end
+
+			-- Void protection: if falling below mountain, fly up
+			if origin.Y < -50 then
+				flyTo(origin + Vector3.new(0, 200, 0))
+				statusText = "Void escape..."; return
 			end
 
 			-- ============================================================
