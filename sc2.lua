@@ -162,6 +162,7 @@ local PICK = {
 	pad = 4,
 	instantRadius = 60,
 	instantTick = 0.25,
+	oneHitBurst = 50,
 }
 
 local COLORS = {
@@ -5346,6 +5347,15 @@ do
 			end
 
 			return pcall(function()
+				if oneHit then
+					-- One-hit: burst all swings at the same point so the
+					-- total damage exceeds crystal HP with any pickaxe.
+					for _ = 1, PICK.oneHitBurst do
+						event:FireServer(name, aim)
+					end
+					return
+				end
+
 				for step = 0, DIG_BURST - 1 do
 					event:FireServer(name, aim - Vector3.new(0, step * DIG_SINK, 0))
 				end
