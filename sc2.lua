@@ -1962,6 +1962,8 @@ local function pickupStep()
 	if grabs > 0 then
 		lastPickup = now
 	end
+
+	return grabs > 0
 end
 
 local BackpackLabel
@@ -5518,7 +5520,9 @@ do
 				end
 			end
 
-			pickupStep()
+			if pickupStep() then
+				lastPickupTime = now
+			end
 
 			if heldPick == nil or heldPick.Parent ~= LocalPlayer.Character then
 				equipClock = 0
@@ -5683,6 +5687,13 @@ do
 				if not spot then
 					barrenCycles += 1
 
+					if barrenCycles >= 12 then
+						Library:Notify("Mountain depleted, hopping server", 3)
+						Net.hop()
+						stop()
+						return
+					end
+
 					if barrenCycles >= 5 then
 						local ms = mountainSpot() or origin
 						local warpPos = ms + Vector3.new(math.random(-120, 120), 30, math.random(-120, 120))
@@ -5690,14 +5701,6 @@ do
 						requestStream(warpPos)
 						statusText = "No surface, warping..."
 						task.wait(0.5)
-						barrenCycles = 0
-						return
-					end
-
-					if barrenCycles >= 12 then
-						Library:Notify("Mountain depleted, hopping server", 3)
-						Net.hop()
-						stop()
 						return
 					end
 
