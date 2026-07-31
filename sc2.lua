@@ -5121,6 +5121,8 @@ do
 	collectgap = 0.15,
 	grabgap = 0.05,
 	searchgap = 2,
+	surfacegap = 0.4,
+	surfacehits = 2,
 }
 
 local OFFSETS = { Vector2.new(0, 0) }
@@ -5250,6 +5252,7 @@ local OFFSETS = { Vector2.new(0, 0) }
 		local lastPickupTime = os.clock()
 		local crystalDrought = 0
 		local searchClock = 0
+		local surfaceHits = 0
 
 		local function toggleValue(name)
 			local store = Library and Library.Toggles
@@ -5381,7 +5384,7 @@ local OFFSETS = { Vector2.new(0, 0) }
 			return Move.glide(goal, aim)
 		end
 
-		local function swing(spot)
+		local function swing(spot, burst)
 			local event = Farm.digEvent()
 			if not event or not heldPick then
 				return false
@@ -5396,11 +5399,16 @@ local OFFSETS = { Vector2.new(0, 0) }
 			end
 
 			return pcall(function()
-				-- Surface digging: never drill straight down in one-hit mode.
-				local depth = oneHit and 1 or C.digburst
-				for step = 0, depth - 1 do
-					event:FireServer(name, aim - Vector3.new(0, step * C.digsink, 0))
+				if burst then
+					-- Crystal: concentrate all swings on it, no downward step.
+					for _ = 1, C.digburst do
+						event:FireServer(name, aim)
+					end
+					return
 				end
+
+				-- Surface: one hit only - never drills down.
+				event:FireServer(name, aim)
 			end)
 		end
 
@@ -5636,7 +5644,7 @@ local OFFSETS = { Vector2.new(0, 0) }
 
 				if canSwing then
 					swingClock -= swingNeed
-					swing(digSpot)
+					swing(digSpot, true)
 				end
 
 				if now - grabClock >= C.grabgap then
@@ -5662,17 +5670,40 @@ local OFFSETS = { Vector2.new(0, 0) }
 				return
 			end
 
-			-- No digging: only go to crystals around. When none are in
-			-- range, hop to a nearby spot and keep looking.
-			if now - searchClock >= C.searchgap then
-				searchClock = now
+			-- No loot: mine the surface lightly to spawn crystals.
+			-- One hit per spot, then move on - never digs down.
+			if now - surfaceClock >= C.surfacegap then
+				surfaceClock = now
 
-				local ms = mountainSpot() or root.Position
-				local span = mountainSpan() * 0.8
-				local drift = ms + Vector3.new(math.random(-span, span), 10, math.random(-span, span))
-				teleportTo(drift)
-				requestStream(drift)
-				statusText = "Searching crystals..."
+				if not target then
+					local ms = mountainSpot() or root.Position
+					local span = mountainSpan() * 0.7
+
+					for _ = 1, 6 do
+						local hit = surfaceAt(ms.X + math.random(-span, span), ms.Z + math.random(-span, span))
+						if hit then
+							target = hit
+							break
+						end
+					end
+				end
+			end
+
+			if target then
+				holdAt(CFrame.new(target + Vector3.new(0, C.diglift, 0), target), target)
+
+				if canSwing then
+					swingClock -= swingNeed
+					swing(target)
+
+					surfaceHits += 1
+					if surfaceHits >= C.surfacehits then
+						surfaceHits = 0
+						target = nil
+					end
+				end
+
+				statusText = "Mining surface..."
 			else
 				statusText = "No crystals nearby"
 			end
@@ -5719,7 +5750,7 @@ local OFFSETS = { Vector2.new(0, 0) }
 
 		local MoneyBox = Tabs.farming:AddRightGroupbox("Money Farm", "banknote")
 
-		MoneyBox:AddLabel("Collects nearby crystals - no digging", true)
+		MoneyBox:AddLabel("Mines surface lightly & collects nearby crystals", true)
 		MoneyBox:AddDivider()
 
 		MoneyBox:AddToggle("AutoFarmMoney", {
