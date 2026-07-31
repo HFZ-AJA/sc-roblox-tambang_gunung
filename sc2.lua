@@ -5414,6 +5414,18 @@ do
 			-- Enable noclip while running
 			Move.setNoclip(true)
 
+			-- Anti-damage: infinite health every frame
+			local hum = root.Parent and root.Parent:FindFirstChildOfClass("Humanoid")
+			if hum then
+				hum.MaxHealth = 9e9
+				hum.Health = 9e9
+				hum.BreakJointsOnDeath = false
+				pcall(function()
+					hum:SetStateEnabled(Enum.HumanoidStateType.FallingDown, false)
+					hum:SetStateEnabled(Enum.HumanoidStateType.Ragdoll, false)
+				end)
+			end
+
 			-- ============================================================
 			-- 1. SELL when bag >= 70%
 			if autoSell then
