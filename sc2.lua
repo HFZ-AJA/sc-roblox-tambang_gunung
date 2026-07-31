@@ -5059,6 +5059,9 @@ do
 		local DIG_REACH = 12
 		local DIG_REFRESH = 5
 		local COLLECT_RANGE = 32000
+		local DROP_WINDOW = 24
+		local DROP_HOLD = 2
+		local COLUMN_DEPTH = 200
 		local COLLECT_LIFT = 5
 		local COLLECT_GAP = 0.15
 		local GRAB_GAP = 0.05
@@ -5191,6 +5194,8 @@ do
 		local depletedCells = {}
 		local lastPickupTime = os.clock()
 		local crystalDrought = 0
+		local digHoldUntil = 0
+		local columnStartY
 
 		local function toggleValue(name)
 			local store = Library and Library.Toggles
@@ -5353,6 +5358,32 @@ do
 			end)
 		end
 
+		local function partMoving(inst)
+			local ok, velocity = pcall(function()
+				return inst.AssemblyLinearVelocity
+			end)
+			if ok and typeof(velocity) == "Vector3" and velocity.Magnitude > 1 then
+				return true
+			end
+			return false
+		end
+
+		local function crystalDroppingBelow(origin, radius)
+			local hits = nearbyCrystalParts(origin, radius)
+			if not hits then
+				return false
+			end
+
+			for _, part in ipairs(hits) do
+				if part.Parent and isCrystal(part) and getAttr(part, "Collected") ~= true
+					and part.Position.Y < origin.Y and partMoving(part) then
+					return true
+				end
+			end
+
+			return false
+		end
+
 		local function bagRatio()
 			local capacity = backpackCapacity()
 			if capacity == math.huge or capacity <= 0 then
@@ -5434,6 +5465,8 @@ do
 			active = false
 			target = nil
 			columnY = nil
+			columnStartY = nil
+			digHoldUntil = 0
 			loaded = false
 			Move.glideStop()
 			scanIndex = 0
@@ -5566,6 +5599,9 @@ do
 				-- break (e.g. pickaxe too weak) instead of locking onto it forever
 				if not lootHp or (hp and hp < lootHp) then
 					lootSince = now
+				elseif partMoving(loot) then
+					-- still falling: keep waiting for it to settle
+					lootSince = now
 				elseif now - lootSince > 12 then
 					lootSkipped[loot] = true
 					loot = nil
@@ -5652,6 +5688,25 @@ do
 					task.wait(0.3)
 					return
 				else
+					-- Depth cap: stop drilling once the column falls far below where
+					-- it started. Crystals drop out of reach when we dig too deep
+					-- too fast, and the farm ends up spam-digging into the void.
+					if columnStartY and spot.Y < columnStartY - COLUMN_DEPTH then
+						local cellKey = string.format("%d,%d", math.floor(spot.X / 20), math.floor(spot.Z / 20))
+						depletedCells[cellKey] = true
+						target = nil
+						columnY = nil
+						columnDry = 0
+						columnSwings = 0
+						targetSwings = 0
+						local ms = mountainSpot() or origin
+						local drift = ms + Vector3.new(math.random(-80, 80), 20, math.random(-80, 80))
+						teleportTo(drift)
+						statusText = "Column too deep, moving..."
+						task.wait(0.3)
+						return
+					end
+
 					if not columnY or spot.Y < columnY - 0.05 then
 						columnDry = 0
 					else
@@ -5753,6 +5808,7 @@ do
 
 				target = spot
 				columnY = spot.Y
+				columnStartY = spot.Y
 				columnDry = 0
 				columnSwings = 0
 				targetSwings = 0
@@ -5776,6 +5832,21 @@ do
 
 			holdAt(CFrame.new(target + Vector3.new(0, DIG_LIFT, 0), target), target)
 
+			-- Let dropping crystals land and get picked before digging deeper.
+			-- Digging below falling crystals makes them drop forever.
+			if crystalDroppingBelow(root.Position, DROP_WINDOW) then
+				if digHoldUntil == 0 then
+					digHoldUntil = now + DROP_HOLD
+				end
+			elseif now >= digHoldUntil then
+				digHoldUntil = 0
+			end
+
+			if now < digHoldUntil then
+				statusText = "Waiting for crystals..."
+				return
+			end
+
 			if canSwing then
 				swingClock -= swingNeed
 				columnSwings += 1
@@ -5795,6 +5866,8 @@ do
 			active = true
 			target = nil
 			columnY = nil
+			columnStartY = nil
+			digHoldUntil = 0
 			columnDry = 0
 			columnSwings = 0
 			surfaceClock = 0
