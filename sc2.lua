@@ -5628,6 +5628,15 @@ do
 			if loot then
 				local spot = loot.Position
 
+				-- Top-crystal mode: teleport straight to far crystals instead of
+				-- gliding across the map.
+				if (spot - root.Position).Magnitude > PICK.range + 1 then
+					requestStream(spot)
+					teleportTo(loot)
+					statusText = "TP to top crystal"
+					return
+				end
+
 				holdAt(CFrame.new(spot + Vector3.new(0, COLLECT_LIFT, 0), spot), spot)
 
 				requestStream(spot)
@@ -5664,6 +5673,12 @@ do
 
 				return
 			end
+
+			-- Top-crystal-only mode: never drill columns. Keep scanning so newly
+			-- spawned crystals are found and collected.
+			requestStream(root.Position)
+			statusText = "Searching top crystal..."
+			return
 
 			local origin = farmOrigin(root)
 
@@ -5874,7 +5889,7 @@ do
 			peakClock = 0
 			scanIndex = 0
 			scanUntil = 0
-			loaded = false
+			loaded = true
 			loot = nil
 			lootClock = 0
 			lootHp = nil
