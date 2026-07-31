@@ -5389,24 +5389,7 @@ do
 			scanIndex += deltaTime
 
 			-- ============================================================
-			-- 1. TERRAIN LOAD — visit scan spots once
-			if not loaded then
-				if scanIndex >= 0.1 then
-					scanIndex = 0
-					scanUntil += 1
-					local spots = moneyDynamicSpots()
-					if scanUntil <= #spots then
-						teleportTo(spots[scanUntil].Position + Vector3.new(0, 20, 0))
-						statusText = string.format("Scan %d/%d", scanUntil, #spots)
-						return
-					end
-					loaded = true
-				end
-				return
-			end
-
-			-- ============================================================
-			-- 2. SELL when bag >= 70%
+			-- 1. SELL when bag >= 70%
 			if autoSell then
 				if sellUntil > 0 then
 					if now < sellUntil then statusText = "Selling..."; return end
@@ -5422,7 +5405,7 @@ do
 			end
 
 			-- ============================================================
-			-- 3. PICKUP loose crystals & equip pickaxe
+			-- 2. PICKUP loose crystals & equip pickaxe
 			pickupStep()
 			if equipClock >= 1 then
 				equipClock = 0
@@ -5434,61 +5417,61 @@ do
 			end
 
 			-- ============================================================
-			-- 4. FIND crystals (check every heartbeat, simple scan)
+			-- 3. FIND nearest uncollected crystal
 			if loot and (not loot.Parent or getAttr(loot, "Collected") == true) then loot = nil end
 
 			if not loot then
-				-- Quick scan: registry first, then containers
+				local best, bestDist
 				for inst in pairs(registry) do
 					if inst.Parent and isCrystal(inst) and getAttr(inst, "Collected") ~= true then
 						local v = crystalValue(inst)
-						if meetsFilter(inst, v) and (inst.Position - origin).Magnitude < 200 then
-							loot = inst
-							break
+						if meetsFilter(inst, v) then
+							local d = (inst.Position - origin).Magnitude
+							if not best or d < bestDist then best = inst; bestDist = d end
 						end
 					end
 				end
-				if not loot then
-					loot = findLoot(backpackFree(), origin)
+				if not best then
+					best = findLoot(backpackFree(), origin)
 				end
+				loot = best
 			end
 
 			-- ============================================================
-			-- 5. COLLECT crystal (break if MinedHP > 0, else grab)
+			-- 4. CRYSTAL: fly to it → break → grab
 			if loot then
 				local spot = loot.Position
-				if (spot - origin).Magnitude > 15 then
-					if swingClock >= 0.5 then  -- TP once per ~30 frames
-						swingClock = 0
-						teleportTo(spot + Vector3.new(0, 3, 0))
-						requestStream(spot)
-					end
-					statusText = string.format("TP %s", crystalRarity(loot))
-					return
-				end
+				local dist = (spot - origin).Magnitude
 
-				local hp = getAttr(loot, "MinedHP")
-				if tonumber(hp) and tonumber(hp) > 0 then
-					if swingClock >= 0.15 then
-						swingClock = 0
-						swing(spot)
-					end
-					statusText = string.format("Break %s %dHP", crystalRarity(loot), hp)
+				if dist > 8 then
+					-- Fly to crystal
+					holdAt(CFrame.new(spot + Vector3.new(0, 4, 0), spot), spot)
+					requestStream(spot)
+					statusText = string.format("Fly to %s [%dm]", crystalRarity(loot), math.floor(dist))
 				else
-					if grabCrystal(loot, crystalPrompt(loot)) then
-						loot = nil
-						statusText = "Got crystal"
+					-- Close enough — break or grab
+					local hp = getAttr(loot, "MinedHP")
+					if tonumber(hp) and tonumber(hp) > 0 then
+						if swingClock >= 0.12 then
+							swingClock = 0
+							swing(spot)
+						end
+						statusText = string.format("Break %s %dHP", crystalRarity(loot), hp)
+					else
+						if grabCrystal(loot, crystalPrompt(loot)) then
+							loot = nil
+							statusText = "Got crystal!"
+						end
 					end
 				end
 				return
 			end
 
 			-- ============================================================
-			-- 6. MINE terrain to reveal crystals
+			-- 5. NO CRYSTAL: fly to mountain surface → mine
 			if not target or now - surfaceClock >= SURFACE_GAP then
 				surfaceClock = now
 				local spot = pickTarget(origin, now) or surfaceAt(origin.X, origin.Z)
-
 				if not spot then
 					barrenCycles += 1
 					if barrenCycles >= 6 then
@@ -5496,37 +5479,34 @@ do
 						Net.hop(); stop(); return
 					end
 					local ms = mountainSpot() or origin
-					teleportTo(ms + Vector3.new(math.random(-120, 120), 50, math.random(-120, 120)))
-					statusText = "Find surface..."; return
+					spot = ms + Vector3.new(math.random(-120, 120), 60, math.random(-120, 120))
+					holdAt(CFrame.new(spot, spot - Vector3.new(0, 1, 0)))
+					statusText = "Finding surface..."; return
 				end
-
-				-- Track column depth
 				if target then
-					local oldY = target.Y
-					if spot.Y >= oldY - 0.05 then columnSwings += 1 else columnSwings = 0 end
+					if spot.Y >= target.Y - 0.05 then columnSwings += 1 else columnSwings = 0 end
 				end
 				barrenCycles = 0
 				target = spot
 			end
 
-			-- Column dry check
 			if columnSwings >= COLUMN_DRY then
 				target = nil; columnSwings = 0
 				local ms = mountainSpot() or origin
-				teleportTo(ms + Vector3.new(math.random(-80, 80), 30, math.random(-80, 80)))
-				statusText = "Column dry, moving..."
-				task.wait(0.3)
+				holdAt(CFrame.new(ms + Vector3.new(math.random(-80, 80), 40, math.random(-80, 80))))
+				statusText = "Column dry, flying..."
 				return
 			end
 
-			-- Move to mining spot
-			if (target - origin).Magnitude > 15 then
-				teleportTo(target + Vector3.new(0, DIG_LIFT, 0))
-				statusText = "Moving..."; return
+			-- Fly to mining spot
+			if (target - origin).Magnitude > 8 then
+				holdAt(CFrame.new(target + Vector3.new(0, DIG_LIFT, 0), target), target)
+				statusText = string.format("Fly to surface %dm", math.floor(target.Y))
+				return
 			end
 
 			-- Mine!
-			if swingClock >= 0.15 then
+			if swingClock >= 0.12 then
 				swingClock = 0
 				local event = Farm.digEvent()
 				if event and heldPick then
@@ -5537,7 +5517,7 @@ do
 					end)
 				end
 			end
-			statusText = string.format("Mine %dm", math.floor(target.Y))
+			statusText = string.format("Mining %dm", math.floor(target.Y))
 		end
 
 		local function setActive(value)
