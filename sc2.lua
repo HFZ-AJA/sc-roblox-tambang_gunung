@@ -5058,9 +5058,7 @@ do
 		local SELL_WAIT = 7
 		local DIG_REACH = 12
 		local DIG_REFRESH = 5
-		-- ponytail: 32000 (whole map) let the farm chase far-off crystals; 1500 keeps
-		-- it near the mountain. Raise if the map grows or you farm another region.
-		local COLLECT_RANGE = 1500
+		local COLLECT_RANGE = 32000
 		local COLLECT_LIFT = 5
 		local COLLECT_GAP = 0.15
 		local GRAB_GAP = 0.05
@@ -5169,6 +5167,8 @@ do
 		local grabClock = 0
 		local lootHp
 		local lootMax
+		local lootSince = 0
+		local lootSkipped = {}
 		local target
 		local columnY
 		local columnDry = 0
@@ -5322,7 +5322,7 @@ do
 			return Move.glide(goal, aim)
 		end
 
-		local function swing(spot)
+		local function swing(spot, direct)
 			local event = Farm.digEvent()
 			if not event or not heldPick then
 				return false
@@ -5332,7 +5332,10 @@ do
 			local root = getRoot()
 			local aim = spot
 
-			if root then
+			-- direct: fire at the exact position. While digging down, embedded
+			-- crystals sit below the terrain surface, so aimPoint's raycast hits
+			-- terrain first and the crystal never breaks.
+			if not direct and root then
 				aim = aimPoint(root.Position, spot, pickReach(heldPick), os.clock()) or spot
 			end
 
@@ -5362,6 +5365,10 @@ do
 					return
 				end
 				seen[inst] = true
+
+				if lootSkipped[inst] then
+					return
+				end
 
 				if not inst.Parent or not isCrystal(inst) or getAttr(inst, "Collected") == true then
 					return
@@ -5438,6 +5445,7 @@ do
 			lastPickupTime = os.clock()
 			table.clear(minedYSet)
 			table.clear(depletedCells)
+			table.clear(lootSkipped)
 
 			Move.setFly(toggleValue("Fly"))
 			Move.setNoclip(toggleValue("Noclip"))
@@ -5547,6 +5555,19 @@ do
 					lootMax = hp
 				end
 
+				-- Refresh progress stamp while HP drops; abandon a crystal we can't
+				-- break (e.g. pickaxe too weak) instead of locking onto it forever
+				if not lootHp or (hp and hp < lootHp) then
+					lootSince = now
+				elseif now - lootSince > 12 then
+					lootSkipped[loot] = true
+					loot = nil
+					lootHp = nil
+					lootMax = nil
+					statusText = "Skipping unbreakable crystal"
+					return
+				end
+
 				lootHp = hp
 			end
 
@@ -5557,6 +5578,7 @@ do
 				if loot then
 					lootHp = tonumber(getAttr(loot, "MinedHP"))
 					lootMax = lootHp
+					lootSince = now
 				end
 			end
 
@@ -5579,7 +5601,8 @@ do
 
 				if canSwing then
 					swingClock -= swingNeed
-					swing(digSpot)
+					-- direct aim while the crystal is still intact (embedded below surface)
+					swing(digSpot, lootHp and lootHp > 0)
 				end
 
 				if now - grabClock >= GRAB_GAP then
@@ -5796,6 +5819,7 @@ do
 			lastPickupTime = os.clock()
 			table.clear(minedYSet)
 			table.clear(depletedCells)
+			table.clear(lootSkipped)
 
 			Move.setFly(false)
 			Move.setNoclip(true)
