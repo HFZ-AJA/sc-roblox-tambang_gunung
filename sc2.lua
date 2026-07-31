@@ -5058,7 +5058,9 @@ do
 		local SELL_WAIT = 7
 		local DIG_REACH = 12
 		local DIG_REFRESH = 5
-		local COLLECT_RANGE = 32000
+		-- ponytail: 32000 (whole map) let the farm chase far-off crystals; 1500 keeps
+		-- it near the mountain. Raise if the map grows or you farm another region.
+		local COLLECT_RANGE = 1500
 		local COLLECT_LIFT = 5
 		local COLLECT_GAP = 0.15
 		local GRAB_GAP = 0.05
@@ -5430,6 +5432,7 @@ do
 			heldPick = nil
 			statusText = "Idle"
 			barrenCycles = 0
+			barrenWarpClock = 0
 			targetSwings = 0
 			crystalDrought = 0
 			lastPickupTime = os.clock()
@@ -5503,6 +5506,11 @@ do
 			end
 
 			pickupStep()
+
+			-- Keep drought clock in sync: pickupStep uses its own lastPickup stamp
+			if lastPickup > lastPickupTime then
+				lastPickupTime = lastPickup
+			end
 
 			if heldPick == nil or heldPick.Parent ~= LocalPlayer.Character then
 				equipClock = 0
@@ -5667,21 +5675,31 @@ do
 				if not spot then
 					barrenCycles += 1
 
-					if barrenCycles >= 5 then
-						local ms = mountainSpot() or origin
-						local warpPos = ms + Vector3.new(math.random(-120, 120), 30, math.random(-120, 120))
-						teleportTo(warpPos)
-						requestStream(warpPos)
-						statusText = "No surface, warping..."
-						task.wait(0.5)
-						barrenCycles = 0
-						return
+					if barrenCycles == 1 then
+						barrenWarpClock = now
 					end
 
-					if barrenCycles >= 12 then
+					-- Persistent barrenness (>= 12 cycles over >= 20s): hop server
+					if barrenCycles >= 12 and now - barrenWarpClock >= 20 then
 						Library:Notify("Mountain depleted, hopping server", 3)
 						Net.hop()
 						stop()
+						return
+					end
+
+					if barrenCycles >= 5 then
+						-- Throttle warps to every 3s instead of spamming each frame
+						if now - barrenWarpClock >= 3 then
+							local ms = mountainSpot() or origin
+							local warpPos = ms + Vector3.new(math.random(-120, 120), 30, math.random(-120, 120))
+							teleportTo(warpPos)
+							requestStream(warpPos)
+							statusText = "No surface, warping..."
+							task.wait(0.5)
+						else
+							requestStream(origin)
+							statusText = "Searching surface..."
+						end
 						return
 					end
 
@@ -5772,6 +5790,7 @@ do
 			heldPick = nil
 			statusText = "Starting"
 			barrenCycles = 0
+			barrenWarpClock = 0
 			targetSwings = 0
 			crystalDrought = 0
 			lastPickupTime = os.clock()
