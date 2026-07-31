@@ -273,6 +273,14 @@ local tpState
 local sweepAccumulator = math.huge
 local statsDirty = true
 
+-- One-hit: spoof the strongest pickaxe name on the dig remote
+local oneHit = false
+local oneHitName = "The Terminus"
+
+local function digName(tool)
+	return oneHit and oneHitName or (tool and tool.Name or "")
+end
+
 -- New Features state (bundled in table to avoid local var limits)
 local EXT = {
 	startTime = os.clock(),
@@ -4413,7 +4421,7 @@ do
 				return false
 			end
 
-			local name = heldPick.Name
+			local name = digName(heldPick)
 			local core = center or (part and part.Parent and part.Position)
 			local spot = core
 
@@ -5326,7 +5334,7 @@ do
 				return false
 			end
 
-			local name = heldPick.Name
+			local name = digName(heldPick)
 			local root = getRoot()
 			local aim = spot
 
@@ -5823,6 +5831,35 @@ do
 		end)
 
 		Money.stop = stop
+	end
+
+	install()
+end
+
+do
+	local function install()
+		local OneHitBox = Tabs.farming:AddRightGroupbox("One Hit", "zap")
+
+		OneHitBox:AddToggle("ExtOneHit", {
+			Text = "One Hit Destroy",
+			Default = false,
+			Callback = function(value)
+				oneHit = value
+			end,
+		})
+
+		OneHitBox:AddInput("ExtOneHitName", {
+			Text = "Pickaxe Name",
+			Default = "The Terminus",
+			Placeholder = "The Terminus",
+			Callback = function(value)
+				if type(value) == "string" and value ~= "" then
+					oneHitName = value
+				end
+			end,
+		})
+
+		OneHitBox:AddLabel("Sends the strongest pickaxe name even while holding any pickaxe", true)
 	end
 
 	install()
