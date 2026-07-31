@@ -5352,6 +5352,7 @@ do
 			columnY = nil
 			loaded = false
 			Move.glideStop()
+			stopFly()
 			scanIndex = 0
 			loot = nil
 			lootHp = nil
@@ -5373,6 +5374,29 @@ do
 			Mountain.setAutoGrab(toggleValue("AutoRunePickup"))
 		end
 
+		local flyBv = nil
+
+		local function stopFly()
+			if flyBv and flyBv.Parent then pcall(flyBv.Destroy, flyBv) end
+			flyBv = nil
+		end
+
+		local function flyTo(pos)
+			local root = getRoot()
+			if not root then return end
+			if not flyBv or not flyBv.Parent then
+				stopFly()
+				local bv = Instance.new("BodyVelocity")
+				bv.Name = "FarmFly"
+				bv.MaxForce = Vector3.new(9e9, 9e9, 9e9)
+				bv.P = math.huge
+				bv.Parent = root
+				flyBv = bv
+			end
+			local dir = (pos - root.Position)
+			if dir.Magnitude > 0 then flyBv.Velocity = dir.Unit * 250 end
+		end
+
 		local function step(deltaTime)
 			local root = getRoot()
 			if not root then
@@ -5383,33 +5407,34 @@ do
 			local now = os.clock()
 			local origin = root.Position
 
-			-- Rate timers
 			swingClock += deltaTime
 			equipClock += deltaTime
 			scanIndex += deltaTime
+
+			-- Enable noclip while running
+			Move.setNoclip(true)
 
 			-- ============================================================
 			-- 1. SELL when bag >= 70%
 			if autoSell then
 				if sellUntil > 0 then
 					if now < sellUntil then statusText = "Selling..."; return end
-					sellUntil = 0
+					sellUntil = 0; stopFly()
 					loot = nil; target = nil
 					return
 				end
 				if bagRatio() >= SELL_MARK then
-					sellUntil = now + SELL_WAIT
+					sellUntil = now + SELL_WAIT; stopFly()
 					doSell()
 					statusText = "Selling..."; return
 				end
 			end
 
 			-- ============================================================
-			-- 2. PICKUP loose crystals & equip pickaxe
+			-- 2. PICKUP & equip
 			pickupStep()
 			if equipClock >= 1 then
-				equipClock = 0
-				heldPick = Farm.equipPick()
+				equipClock = 0; heldPick = Farm.equipPick()
 			end
 			if not heldPick then
 				heldPick = Farm.equipPick()
@@ -5417,50 +5442,48 @@ do
 			end
 
 			-- ============================================================
-			-- 3. FIND nearest uncollected crystal
+			-- 3. FIND nearest crystal
 			if loot and (not loot.Parent or getAttr(loot, "Collected") == true) then loot = nil end
 
 			if not loot then
-				local best, bestDist
+				local best, bestD
 				for inst in pairs(registry) do
 					if inst.Parent and isCrystal(inst) and getAttr(inst, "Collected") ~= true then
 						local v = crystalValue(inst)
 						if meetsFilter(inst, v) then
 							local d = (inst.Position - origin).Magnitude
-							if not best or d < bestDist then best = inst; bestDist = d end
+							if not best or d < bestD then best = inst; bestD = d end
 						end
 					end
 				end
-				if not best then
-					best = findLoot(backpackFree(), origin)
+				if not best then best = findLoot(backpackFree(), origin) end
+				if best then
+					loot = best
+					stopFly()  -- reset velocity for new target
 				end
-				loot = best
 			end
 
 			-- ============================================================
-			-- 4. CRYSTAL: fly to it → break → grab
+			-- 4. CRYSTAL: fly closer → break → grab
 			if loot then
 				local spot = loot.Position
 				local dist = (spot - origin).Magnitude
 
-				if dist > 8 then
-					-- Fly to crystal
-					holdAt(CFrame.new(spot + Vector3.new(0, 4, 0), spot), spot)
+				if dist > 6 then
+					flyTo(spot + Vector3.new(0, 3, 0))
 					requestStream(spot)
-					statusText = string.format("Fly to %s [%dm]", crystalRarity(loot), math.floor(dist))
+					statusText = string.format("To %s [%dm]", crystalRarity(loot), math.floor(dist))
 				else
-					-- Close enough — break or grab
+					stopFly()
 					local hp = getAttr(loot, "MinedHP")
 					if tonumber(hp) and tonumber(hp) > 0 then
-						if swingClock >= 0.12 then
-							swingClock = 0
-							swing(spot)
+						if swingClock >= 0.1 then
+							swingClock = 0; swing(spot)
 						end
 						statusText = string.format("Break %s %dHP", crystalRarity(loot), hp)
 					else
 						if grabCrystal(loot, crystalPrompt(loot)) then
-							loot = nil
-							statusText = "Got crystal!"
+							loot = nil; statusText = "Got crystal!"
 						end
 					end
 				end
@@ -5468,45 +5491,43 @@ do
 			end
 
 			-- ============================================================
-			-- 5. NO CRYSTAL: fly to mountain surface → mine
+			-- 5. NO CRYSTAL: mine surface
 			if not target or now - surfaceClock >= SURFACE_GAP then
 				surfaceClock = now
 				local spot = pickTarget(origin, now) or surfaceAt(origin.X, origin.Z)
 				if not spot then
 					barrenCycles += 1
-					if barrenCycles >= 6 then
-						Library:Notify("Mountain depleted, hopping", 3)
+					if barrenCycles >= 5 then
+						Library:Notify("Empty, hopping", 3)
 						Net.hop(); stop(); return
 					end
 					local ms = mountainSpot() or origin
-					spot = ms + Vector3.new(math.random(-120, 120), 60, math.random(-120, 120))
-					holdAt(CFrame.new(spot, spot - Vector3.new(0, 1, 0)))
-					statusText = "Finding surface..."; return
+					flyTo(ms + Vector3.new(math.random(-100, 100), 60, math.random(-100, 100)))
+					statusText = "Find surface..."; return
 				end
 				if target then
 					if spot.Y >= target.Y - 0.05 then columnSwings += 1 else columnSwings = 0 end
 				end
-				barrenCycles = 0
-				target = spot
+				barrenCycles = 0; target = spot; stopFly()
 			end
 
+			-- Column dry
 			if columnSwings >= COLUMN_DRY then
-				target = nil; columnSwings = 0
-				local ms = mountainSpot() or origin
-				holdAt(CFrame.new(ms + Vector3.new(math.random(-80, 80), 40, math.random(-80, 80))))
-				statusText = "Column dry, flying..."
-				return
+				target = nil; columnSwings = 0; stopFly()
+				statusText = "Moving..."; return
 			end
 
 			-- Fly to mining spot
-			if (target - origin).Magnitude > 8 then
-				holdAt(CFrame.new(target + Vector3.new(0, DIG_LIFT, 0), target), target)
-				statusText = string.format("Fly to surface %dm", math.floor(target.Y))
+			if (target - origin).Magnitude > 6 then
+				flyTo(target + Vector3.new(0, DIG_LIFT, 0))
+				statusText = string.format("To surface %dm", math.floor(target.Y))
 				return
 			end
 
-			-- Mine!
-			if swingClock >= 0.12 then
+			stopFly()
+
+			-- Mine
+			if swingClock >= 0.1 then
 				swingClock = 0
 				local event = Farm.digEvent()
 				if event and heldPick then
@@ -5561,7 +5582,7 @@ do
 
 		local MoneyBox = Tabs.farming:AddRightGroupbox("Money Farm", "banknote")
 
-		MoneyBox:AddLabel("Mines terrain columns from peak down. Auto-collects spawned crystals. Auto-sell at 70%.", true)
+		MoneyBox:AddLabel("Flies to nearest crystal via BodyVelocity. Breaks & collects. Auto-sell 70%. No teleport.", true)
 		MoneyBox:AddDivider()
 
 		MoneyBox:AddToggle("AutoFarmMoney", {
