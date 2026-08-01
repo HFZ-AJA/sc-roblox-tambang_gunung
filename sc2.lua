@@ -5122,7 +5122,7 @@ do
 	grabgap = 0.05,
 	searchgap = 2,
 	surfacegap = 0.4,
-	surfacehits = 2,
+	surfacehits = 12,
 }
 
 local OFFSETS = { Vector2.new(0, 0) }
@@ -5195,7 +5195,6 @@ local OFFSETS = { Vector2.new(0, 0) }
 			local goals = {
 				spot,
 				spot - Vector3.new(0, 2, 0),
-				origin - Vector3.new(0, reach, 0),
 			}
 
 			for _, goal in ipairs(goals) do
@@ -5670,12 +5669,13 @@ local OFFSETS = { Vector2.new(0, 0) }
 				return
 			end
 
-			-- No loot: mine the surface lightly to spawn crystals.
-			-- One hit per spot, then move on - never digs down.
-			if now - surfaceClock >= C.surfacegap then
-				surfaceClock = now
+			-- No loot: keep mining the surface so crystals respawn.
+			-- Dig continuously in any direction (never straight down)
+			-- and rotate to a fresh spot after enough swings.
+			if not target then
+				if now - surfaceClock >= C.surfacegap then
+					surfaceClock = now
 
-				if not target then
 					local ms = mountainSpot() or root.Position
 					local span = mountainSpan() * 0.7
 
@@ -5685,6 +5685,14 @@ local OFFSETS = { Vector2.new(0, 0) }
 							target = hit
 							break
 						end
+					end
+
+					-- Fallback: no terrain found, dig sideways at a random
+					-- offset around the player instead of idling.
+					if not target then
+						local angle = math.random() * math.pi * 2
+						local dist = 8 + math.random() * math.max(span, 1)
+						target = root.Position + Vector3.new(math.cos(angle) * dist, 0, math.sin(angle) * dist)
 					end
 				end
 			end
@@ -5697,9 +5705,12 @@ local OFFSETS = { Vector2.new(0, 0) }
 					swing(target)
 
 					surfaceHits += 1
+					-- Mine each spot long enough for crystals to spawn,
+					-- then rotate to a new direction.
 					if surfaceHits >= C.surfacehits then
 						surfaceHits = 0
 						target = nil
+						surfaceClock = 0
 					end
 				end
 
