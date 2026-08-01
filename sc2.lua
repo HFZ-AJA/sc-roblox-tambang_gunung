@@ -308,8 +308,6 @@ local EXT = {
 local statsAccumulator = 0
 local distanceAccumulator = math.huge
 local lastPickup = 0
-local pickupMinValue = 0
-local pickupValueFilter = false
 local autoPickupActive = false
 local lastBagWarn = 0
 local instantPromptActive = false
@@ -1630,8 +1628,8 @@ local function setPickupMinValue(text)
 		return
 	end
 
-	pickupMinValue = math.max(parsed, 0)
-	pickupValueFilter = pickupMinValue > 0
+	PICK.pickupMin = math.max(parsed, 0)
+	PICK.pickupFilter = PICK.pickupMin > 0
 end
 
 local function pickupCandidates(free, origin)
@@ -1657,7 +1655,7 @@ local function pickupCandidates(free, origin)
 		end
 
 		local value = crystalValue(child)
-		if pickupValueFilter and value < pickupMinValue then
+		if PICK.pickupFilter and value < PICK.pickupMin then
 			return
 		end
 
@@ -5262,10 +5260,6 @@ local OFFSETS = { Vector2.new(0, 0) }
 		local lootHp
 		local lootMax
 		local target
-		local columnY
-		local columnDry = 0
-		local columnSwings = 0
-		local surfaceClock = 0
 		local peakClock = 0
 		local scanIndex = 0
 		local scanUntil = 0
@@ -5276,19 +5270,12 @@ local OFFSETS = { Vector2.new(0, 0) }
 		local sellUntil = 0
 		local lootBlocked = false
 		local statusText = "Idle"
-		local barrenCycles = 0
-		local barrenWarpClock = 0
-		local minedYSet = {}
-		local targetSwings = 0
-		local depletedCells = {}
 		local lastPickupTime = os.clock()
 		local crystalDrought = 0
-		local searchClock = 0
-		local surfaceHits = 0
-		local phase = "scan"
-		local mineSpot
-		local mineRing = 0
-		local mineClock = 0
+		-- Farm state bundled in one table: install() sits at Luau's
+		-- 200-register limit, and each extra captured local tips it over
+		-- into a CompileError. (Same trick as the EXT table.)
+		local MINE = { phase = "scan", spot = nil, ring = 0, clock = 0 }
 
 		local function toggleValue(name)
 			local store = Library and Library.Toggles
@@ -5524,7 +5511,6 @@ local OFFSETS = { Vector2.new(0, 0) }
 		local function stop()
 			active = false
 			target = nil
-			columnY = nil
 			loaded = false
 			Move.glideStop()
 			scanIndex = 0
@@ -5536,17 +5522,12 @@ local OFFSETS = { Vector2.new(0, 0) }
 			sellUntil = 0
 			heldPick = nil
 			statusText = "Idle"
-			barrenCycles = 0
-			targetSwings = 0
 			crystalDrought = 0
 			lastPickupTime = os.clock()
-			table.clear(minedYSet)
-			table.clear(depletedCells)
-
-			phase = "scan"
-			mineSpot = nil
-			mineRing = 0
-			mineClock = 0
+			MINE.phase = "scan"
+			MINE.spot = nil
+			MINE.ring = 0
+			MINE.clock = 0
 
 			Move.setFly(toggleValue("Fly"))
 			Move.setNoclip(toggleValue("Noclip"))
@@ -5620,8 +5601,6 @@ local OFFSETS = { Vector2.new(0, 0) }
 				end
 
 				target = nil
-				columnY = nil
-				surfaceClock = 0
 			end
 
 			if autoSell and (bagRatio() >= C.sellmark or lootBlocked) then
@@ -5665,16 +5644,16 @@ local OFFSETS = { Vector2.new(0, 0) }
 			-- scan:    load terrain at the scan spots (once)
 			-- mine:    dig the surface in a ring pattern to spawn crystals
 			-- collect: break + grab a crystal, then back to mine
-			if phase == "scan" then
+			if MINE.phase == "scan" then
 				if loaded then
-					phase = "mine"
-					mineRing = 0
-					mineSpot = nil
+					MINE.phase = "mine"
+					MINE.ring = 0
+					MINE.spot = nil
 					statusText = "Mining surface"
 				end
 			end
 
-			if phase == "mine" then
+			if MINE.phase == "mine" then
 				-- Find crystals like Boulder Farm finds boulders; when one
 				-- shows up, go straight to it.
 				if not loot and now - lootClock >= C.collectgap then
@@ -5684,54 +5663,54 @@ local OFFSETS = { Vector2.new(0, 0) }
 					if loot then
 						lootHp = tonumber(getAttr(loot, "MinedHP"))
 						lootMax = lootHp
-						phase = "collect"
+						MINE.phase = "collect"
 					end
 				end
 
-				if phase ~= "collect" then
+				if MINE.phase ~= "collect" then
 					-- Dig: deterministic ring around the mountain center.
-					if not mineSpot then
-						mineSpot = nextMineSpot(mineRing)
+					if not MINE.spot then
+						MINE.spot = nextMineSpot(MINE.ring)
 					end
 
-					if mineSpot then
-						holdAt(CFrame.new(mineSpot + Vector3.new(0, C.diglift, 0), mineSpot), mineSpot)
+					if MINE.spot then
+						holdAt(CFrame.new(MINE.spot + Vector3.new(0, C.diglift, 0), MINE.spot), MINE.spot)
 
 						if canSwing then
 							swingClock -= swingNeed
-							swing(mineSpot)
+							swing(MINE.spot)
 						end
 					end
 
-					mineClock += deltaTime
+					MINE.clock += deltaTime
 
-					if mineClock >= C.minedwell then
-						mineClock = 0
-						mineRing += 1
-						mineSpot = nil
+					if MINE.clock >= C.minedwell then
+						MINE.clock = 0
+						MINE.ring += 1
+						MINE.spot = nil
 					end
 
 					-- Area dried out: rescan the spots (like Boulder Farm
 					-- rescans when no boulders are found).
 					if now - lastPickupTime >= C.rescan then
 						lastPickupTime = now
-						phase = "scan"
+						MINE.phase = "scan"
 						loaded = false
 						scanIndex = 0
 						statusText = "Rescanning area"
 					end
 
-					statusText = mineSpot and "Mining surface..." or "Scanning for surface"
+					statusText = MINE.spot and "Mining surface..." or "Scanning for surface"
 					return
 				end
 			end
 
-			if phase == "collect" then
+			if MINE.phase == "collect" then
 				if not loot or not loot.Parent or getAttr(loot, "Collected") == true then
 					loot = nil
 					lootHp = nil
 					lootMax = nil
-					phase = "mine"
+					MINE.phase = "mine"
 				else
 					local spot = loot.Position
 
@@ -5800,10 +5779,6 @@ local OFFSETS = { Vector2.new(0, 0) }
 
 			active = true
 			target = nil
-			columnY = nil
-			columnDry = 0
-			columnSwings = 0
-			surfaceClock = 0
 			peakClock = 0
 			scanIndex = 0
 			scanUntil = 0
@@ -5819,17 +5794,12 @@ local OFFSETS = { Vector2.new(0, 0) }
 			sellUntil = 0
 			heldPick = nil
 			statusText = "Starting"
-			barrenCycles = 0
-			targetSwings = 0
 			crystalDrought = 0
 			lastPickupTime = os.clock()
-			table.clear(minedYSet)
-			table.clear(depletedCells)
-
-			phase = "scan"
-			mineSpot = nil
-			mineRing = 0
-			mineClock = 0
+			MINE.phase = "scan"
+			MINE.spot = nil
+			MINE.ring = 0
+			MINE.clock = 0
 
 			Move.setFly(false)
 			Move.setNoclip(true)
