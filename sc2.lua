@@ -153,7 +153,7 @@ local TP = {
 local PICK = {
 	aimRange = 5000,
 	aimDot = 0.995,
-	range = 13,
+	range = 20,
 	cooldown = 0.04,
 	restore = 0.2,
 	burst = 8,
@@ -308,6 +308,8 @@ local EXT = {
 local statsAccumulator = 0
 local distanceAccumulator = math.huge
 local lastPickup = 0
+local pickupMinValue = 0
+local pickupValueFilter = false
 local autoPickupActive = false
 local lastBagWarn = 0
 local instantPromptActive = false
@@ -1622,6 +1624,16 @@ end)
 local pickupFound = {}
 local pickupSeen = {}
 
+local function setPickupMinValue(text)
+	local parsed = parseValue(text)
+	if not parsed then
+		return
+	end
+
+	pickupMinValue = math.max(parsed, 0)
+	pickupValueFilter = pickupMinValue > 0
+end
+
 local function pickupCandidates(free, origin)
 	local found = pickupFound
 	local seen = pickupSeen
@@ -1645,7 +1657,14 @@ local function pickupCandidates(free, origin)
 		end
 
 		local value = crystalValue(child)
-		if not meetsFilter(child, value) then
+		if pickupValueFilter and value < pickupMinValue then
+			return
+		end
+
+		-- Unbroken crystals (MinedHP > 0) need the One Hit breaker first;
+		-- without it the grab just fails, so skip them instead of spamming
+		-- prompts that can never pick.
+		if not oneHit and tonumber(getAttr(child, "MinedHP") or 0) > 0 then
 			return
 		end
 
@@ -3611,6 +3630,18 @@ do
 			Default = false,
 			Callback = Mountain.setAutoGrab,
 		})
+
+		PickupBox:AddDivider()
+
+		PickupBox:AddLabel("Min Value (empty = pick all)", true)
+		PickupBox:AddInput("PickupMinValue", {
+			Text = "Pickup Min Value",
+			Placeholder = "100k / 2m / 1b",
+			Numeric = false,
+			Finished = false,
+			Callback = setPickupMinValue,
+		})
+		PickupBox:AddLabel("Filters in Crystals tab (name / ratio / mutation) apply too", true)
 
 		PickupBox:AddDivider()
 
