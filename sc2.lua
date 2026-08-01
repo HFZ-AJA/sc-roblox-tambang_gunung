@@ -5275,7 +5275,8 @@ local OFFSETS = { Vector2.new(0, 0) }
 		-- Farm state bundled in one table: install() sits at Luau's
 		-- 200-register limit, and each extra captured local tips it over
 		-- into a CompileError. (Same trick as the EXT table.)
-		local MINE = { phase = "scan", spot = nil, ring = 0, clock = 0 }
+		local surfaceClock = 0
+		local surfaceHits = 0
 
 		local function toggleValue(name)
 			local store = Library and Library.Toggles
@@ -5524,35 +5525,10 @@ local OFFSETS = { Vector2.new(0, 0) }
 			statusText = "Idle"
 			crystalDrought = 0
 			lastPickupTime = os.clock()
-			MINE.phase = "scan"
-			MINE.spot = nil
-			MINE.ring = 0
-			MINE.clock = 0
 
 			Move.setFly(toggleValue("Fly"))
 			Move.setNoclip(toggleValue("Noclip"))
 			Mountain.setAutoGrab(toggleValue("AutoRunePickup"))
-		end
-
-		-- Boulder-style: walk a deterministic ring pattern around the
-		-- mountain center so the farm mines a contained area instead of
-		-- roaming randomly. Uses the same OFFSETS grid the old column
-		-- miner built (center + expanding rings, max ~48 studs).
-		local function nextMineSpot(index)
-			local root = getRoot()
-			local ms = mountainSpot() or (root and root.Position) or Vector3.zero
-			local offset = OFFSETS[index % #OFFSETS + 1]
-
-			local x = ms.X + offset.X
-			local z = ms.Z + offset.Y
-
-			local spot = surfaceAt(x, z)
-
-			if spot then
-				return spot
-			end
-
-			return Vector3.new(x, root and root.Position.Y or 0, z)
 		end
 
 		local function step(deltaTime)
@@ -5640,137 +5616,127 @@ local OFFSETS = { Vector2.new(0, 0) }
 			local canSwing = swingClock >= swingNeed
 			local free = backpackFree()
 
-			-- ===== Boulder-style phase machine =====
-			-- scan:    load terrain at the scan spots (once)
-			-- mine:    dig the surface in a ring pattern to spawn crystals
-			-- collect: break + grab a crystal, then back to mine
-			if MINE.phase == "scan" then
-				if loaded then
-					MINE.phase = "mine"
-					MINE.ring = 0
-					MINE.spot = nil
-					statusText = "Mining surface"
+			-- Simple loop: scan for crystals and collect them; when none are
+			-- around, dig the mountain surface locally to spawn more.
+			if loot and (not loot.Parent or getAttr(loot, "Collected") == true) then
+				loot = nil
+				lootHp = nil
+				lootMax = nil
+			end
+
+			if not loot and now - lootClock >= C.collectgap then
+				lootClock = now
+				loot, lootBlocked = findLoot(free, root.Position)
+
+				if loot then
+					lootHp = tonumber(getAttr(loot, "MinedHP"))
+					lootMax = lootHp
 				end
 			end
 
-			if MINE.phase == "mine" then
-				-- Find crystals like Boulder Farm finds boulders; when one
-				-- shows up, go straight to it.
-				if not loot and now - lootClock >= C.collectgap then
-					lootClock = now
-					loot, lootBlocked = findLoot(free, root.Position)
+			if loot then
+				local spot = loot.Position
 
-					if loot then
-						lootHp = tonumber(getAttr(loot, "MinedHP"))
-						lootMax = lootHp
-						MINE.phase = "collect"
+				if not oneHit then
+					holdAt(CFrame.new(spot + Vector3.new(0, C.collectlift, 0), spot), spot)
+				end
+
+				local digSpot = spot
+
+				if not lootHp or lootHp <= 0 then
+					local ground = surfaceAt(spot.X, spot.Z)
+
+					if ground then
+						digSpot = ground
 					end
 				end
 
-				if MINE.phase ~= "collect" then
-					-- Dig: deterministic ring around the mountain center.
-					if not MINE.spot then
-						MINE.spot = nextMineSpot(MINE.ring)
-					end
+				requestStream(spot)
 
-					if MINE.spot then
-						holdAt(CFrame.new(MINE.spot + Vector3.new(0, C.diglift, 0), MINE.spot), MINE.spot)
+				if canSwing then
+					swingClock -= swingNeed
+					swing(digSpot, true)
+				end
 
-						if canSwing then
-							swingClock -= swingNeed
-							swing(MINE.spot)
-						end
-					end
+				if now - grabClock >= C.grabgap then
+					grabClock = now
 
-					MINE.clock += deltaTime
-
-					if MINE.clock >= C.minedwell then
-						MINE.clock = 0
-						MINE.ring += 1
-						MINE.spot = nil
-					end
-
-					-- Area dried out: rescan the spots (like Boulder Farm
-					-- rescans when no boulders are found).
-					if now - lastPickupTime >= C.rescan then
+					if grabCrystal(loot, crystalPrompt(loot)) then
 						lastPickupTime = now
-						MINE.phase = "scan"
-						loaded = false
-						scanIndex = 0
-						statusText = "Rescanning area"
+						crystalDrought = 0
 					end
-
-					statusText = MINE.spot and "Mining surface..." or "Scanning for surface"
-					return
 				end
-			end
 
-			if MINE.phase == "collect" then
-				if not loot or not loot.Parent or getAttr(loot, "Collected") == true then
-					loot = nil
-					lootHp = nil
-					lootMax = nil
-					MINE.phase = "mine"
+				local hp = tonumber(getAttr(loot, "MinedHP"))
+
+				if hp and (lootMax == nil or hp > lootMax) then
+					lootMax = hp
+				end
+
+				lootHp = hp
+
+				if lootHp and lootHp > 0 then
+					local ratio = 0
+
+					if lootMax and lootMax > 0 then
+						ratio = math.clamp(1 - lootHp / lootMax, 0, 1)
+					end
+
+					statusText = string.format("Breaking crystal %d%%", math.floor(ratio * 100))
 				else
-					local spot = loot.Position
-
-					-- One-hit breaks + grabs from range, so stay put and keep
-					-- mining instead of flying to every crystal.
-					if not oneHit then
-						holdAt(CFrame.new(spot + Vector3.new(0, C.collectlift, 0), spot), spot)
-					end
-
-					local digSpot = spot
-
-					if not lootHp or lootHp <= 0 then
-						local ground = surfaceAt(spot.X, spot.Z)
-
-						if ground then
-							digSpot = ground
-						end
-					end
-
-					requestStream(spot)
-
-					if canSwing then
-						swingClock -= swingNeed
-						swing(digSpot, true)
-					end
-
-					if now - grabClock >= C.grabgap then
-						grabClock = now
-
-						if grabCrystal(loot, crystalPrompt(loot)) then
-							lastPickupTime = now
-							crystalDrought = 0
-						end
-					end
-
-					local hp = tonumber(getAttr(loot, "MinedHP"))
-
-					if hp and (lootMax == nil or hp > lootMax) then
-						lootMax = hp
-					end
-
-					lootHp = hp
-
-					if lootHp and lootHp > 0 then
-						local ratio = 0
-
-						if lootMax and lootMax > 0 then
-							ratio = math.clamp(1 - lootHp / lootMax, 0, 1)
-						end
-
-						statusText = string.format("Breaking crystal %d%%", math.floor(ratio * 100))
-					else
-						statusText = "Collecting crystals"
-					end
+					statusText = "Collecting crystals"
 				end
 
 				return
 			end
-		end
 
+			-- No loot: dig the surface around the mountain center so
+			-- crystals respawn. Tight radius, never straight down, and
+			-- rotate only after enough swings at a spot.
+			if not target then
+				if now - surfaceClock >= C.surfacegap then
+					surfaceClock = now
+
+					local ms = mountainSpot() or root.Position
+					local span = 30
+
+					for _ = 1, 6 do
+						local hit = surfaceAt(ms.X + math.random(-span, span), ms.Z + math.random(-span, span))
+						if hit and (hit.Position - root.Position).Magnitude >= 4 then
+							target = hit
+							break
+						end
+					end
+
+					if not target then
+						local angle = math.random() * math.pi * 2
+						local dist = 8 + math.random() * span
+						target = ms + Vector3.new(math.cos(angle) * dist, 0, math.sin(angle) * dist)
+					end
+				end
+			end
+
+			if target then
+				holdAt(CFrame.new(target + Vector3.new(0, C.diglift, 0), target), target)
+
+				if canSwing then
+					swingClock -= swingNeed
+					swing(target)
+
+					surfaceHits += 1
+
+					if surfaceHits >= C.surfacehits then
+						surfaceHits = 0
+						target = nil
+						surfaceClock = 0
+					end
+				end
+
+				statusText = "Mining surface..."
+			else
+				statusText = "No crystals nearby"
+			end
+		end
 		local function setActive(value)
 			if not value then
 				stop()
@@ -5796,15 +5762,16 @@ local OFFSETS = { Vector2.new(0, 0) }
 			statusText = "Starting"
 			crystalDrought = 0
 			lastPickupTime = os.clock()
-			MINE.phase = "scan"
-			MINE.spot = nil
-			MINE.ring = 0
-			MINE.clock = 0
+			target = nil
+			surfaceClock = 0
+			surfaceHits = 0
 
 			Move.setFly(false)
 			Move.setNoclip(true)
 			Mountain.setAutoGrab(true)
 		end
+
+	end
 
 		local MoneyBox = Tabs.farming:AddRightGroupbox("Money Farm", "banknote")
 
@@ -5846,9 +5813,6 @@ local OFFSETS = { Vector2.new(0, 0) }
 		end)
 
 		Money.stop = stop
-	end
-
-	install()
 end
 
 do
