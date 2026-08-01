@@ -5116,7 +5116,7 @@ do
 	sellwait = 7,
 	digreach = 12,
 	digrefresh = 5,
-	collectrange = 200,
+	collectrange = 60,
 	collectlift = 5,
 	collectgap = 0.15,
 	grabgap = 0.05,
@@ -5627,7 +5627,12 @@ local OFFSETS = { Vector2.new(0, 0) }
 			if loot then
 				local spot = loot.Position
 
-				holdAt(CFrame.new(spot + Vector3.new(0, C.collectlift, 0), spot), spot)
+				-- One-hit breaks + grabs from range, so stay put and keep
+				-- mining instead of flying to every crystal. Without one-hit
+				-- the crystal must be approached within pick reach to break it.
+				if not oneHit then
+					holdAt(CFrame.new(spot + Vector3.new(0, C.collectlift, 0), spot), spot)
+				end
 
 				local digSpot = spot
 
@@ -5676,26 +5681,27 @@ local OFFSETS = { Vector2.new(0, 0) }
 				if now - surfaceClock >= C.surfacegap then
 					surfaceClock = now
 
-					-- Mine LOCAL spots (small radius around the player) so the
-					-- farm stops roaming the whole mountain. When a crystal
-					-- spawns, the findLoot scan above spots it and the
-					-- collect branch goes straight to it.
-					local span = 20
+					-- Mine tight spots on the mountain (around its center) so
+					-- the farm stays anchored to one area. Crystals spawn
+					-- here, findLoot (bounded by C.collectrange below) goes
+					-- straight to them — no more roaming the whole map.
+					local ms = mountainSpot() or root.Position
+					local span = 30
 
 					for _ = 1, 6 do
-						local hit = surfaceAt(root.Position.X + math.random(-span, span), root.Position.Z + math.random(-span, span))
+						local hit = surfaceAt(ms.X + math.random(-span, span), ms.Z + math.random(-span, span))
 						if hit and (hit.Position - root.Position).Magnitude >= 4 then
 							target = hit
 							break
 						end
 					end
 
-					-- Fallback: no terrain found, dig sideways at a random
-					-- offset around the player instead of idling.
+					-- Fallback: no surface found, dig sideways around the
+					-- mountain center instead of idle empty-air mining.
 					if not target then
 						local angle = math.random() * math.pi * 2
 						local dist = 8 + math.random() * span
-						target = root.Position + Vector3.new(math.cos(angle) * dist, 0, math.sin(angle) * dist)
+						target = ms + Vector3.new(math.cos(angle) * dist, 0, math.sin(angle) * dist)
 					end
 				end
 			end
