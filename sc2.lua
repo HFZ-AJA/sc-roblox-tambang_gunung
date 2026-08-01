@@ -5453,6 +5453,12 @@ do
 					return
 				end
 
+				-- Skip cells that got stuck/depleted so the farm doesn't keep
+				-- chasing uncollectable crystals.
+				if depletedCells[string.format("%d,%d", math.floor(inst.Position.X / 20), math.floor(inst.Position.Z / 20))] then
+					return
+				end
+
 				local distance = (inst.Position - origin).Magnitude
 				if distance > COLLECT_RANGE then
 					return
@@ -5644,6 +5650,14 @@ do
 
 				local digSpot = spot
 
+				-- Crystals below the character (in holes) must be burst-broken
+				-- at their own position. aimPoint would raycast into the
+				-- ceiling above them, so the farm would never break them and
+				-- would get stuck on this loot forever.
+				if lootHp and lootHp > 0 then
+					burstBreak(loot)
+				end
+
 				if not lootHp or lootHp <= 0 then
 					local ground = surfaceAt(spot.X, spot.Z)
 
@@ -5665,6 +5679,21 @@ do
 						lastPickupTime = now
 						crystalDrought = 0
 					end
+				end
+
+				-- Stuck guard: lootClock freezes while the same crystal is
+				-- targeted, so if it hasn't been collected in 8s it is stuck
+				-- (e.g. unreachable below the map). Drop it, mark the cell
+				-- depleted and warp away instead of stacking forever.
+				if now - lootClock >= 8 then
+					depletedCells[string.format("%d,%d", math.floor(spot.X / 20), math.floor(spot.Z / 20))] = true
+					loot = nil
+					lootHp = nil
+					lootMax = nil
+					local ms = mountainSpot() or root.Position
+					teleportTo(ms + Vector3.new(math.random(-80, 80), 20, math.random(-80, 80)))
+					statusText = "Crystal stuck, moving on"
+					return
 				end
 
 				if lootHp and lootHp > 0 then
