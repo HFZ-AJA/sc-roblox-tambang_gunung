@@ -5122,7 +5122,7 @@ do
 	grabgap = 0.05,
 	searchgap = 2,
 	surfacegap = 0.4,
-	surfacehits = 12,
+	surfacehits = 20,
 }
 
 local OFFSETS = { Vector2.new(0, 0) }
@@ -5676,12 +5676,15 @@ local OFFSETS = { Vector2.new(0, 0) }
 				if now - surfaceClock >= C.surfacegap then
 					surfaceClock = now
 
-					local ms = mountainSpot() or root.Position
-					local span = mountainSpan() * 0.7
+					-- Mine LOCAL spots (small radius around the player) so the
+					-- farm stops roaming the whole mountain. When a crystal
+					-- spawns, the findLoot scan above spots it and the
+					-- collect branch goes straight to it.
+					local span = 20
 
 					for _ = 1, 6 do
-						local hit = surfaceAt(ms.X + math.random(-span, span), ms.Z + math.random(-span, span))
-						if hit then
+						local hit = surfaceAt(root.Position.X + math.random(-span, span), root.Position.Z + math.random(-span, span))
+						if hit and (hit.Position - root.Position).Magnitude >= 4 then
 							target = hit
 							break
 						end
@@ -5691,7 +5694,7 @@ local OFFSETS = { Vector2.new(0, 0) }
 					-- offset around the player instead of idling.
 					if not target then
 						local angle = math.random() * math.pi * 2
-						local dist = 8 + math.random() * math.max(span, 1)
+						local dist = 8 + math.random() * span
 						target = root.Position + Vector3.new(math.cos(angle) * dist, 0, math.sin(angle) * dist)
 					end
 				end
