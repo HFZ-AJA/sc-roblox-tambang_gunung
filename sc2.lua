@@ -163,7 +163,15 @@ local PICK = {
 	instantRadius = 60,
 	instantTick = 0.25,
 	oneHitBurst = 150,
+	pickupMin = 0,
+	pickupFilter = false,
 }
+-- One-hit: burst many swings at the same spot so the total damage
+-- exceeds crystal HP with any pickaxe. Kept global (not local): the
+-- Farm/Money install() functions sit right at Luau's 200-register
+-- limit, and an extra captured local tips them over (CompileError).
+oneHit = false
+
 
 local COLORS = {
 	money = Color3.fromRGB(60, 255, 90),
@@ -273,12 +281,6 @@ local lastReport = 0
 local tpState
 local sweepAccumulator = math.huge
 local statsDirty = true
-
--- One-hit: burst many swings at the same spot so the total damage
--- exceeds crystal HP with any pickaxe. Kept global (not local): the
--- Farm/Money install() functions sit right at Luau's 200-register
--- limit, and an extra captured local tips them over (CompileError).
-oneHit = false
 
 -- New Features state (bundled in table to avoid local var limits)
 local EXT = {
@@ -1622,16 +1624,6 @@ end)
 local pickupFound = {}
 local pickupSeen = {}
 
-local function setPickupMinValue(text)
-	local parsed = parseValue(text)
-	if not parsed then
-		return
-	end
-
-	PICK.pickupMin = math.max(parsed, 0)
-	PICK.pickupFilter = PICK.pickupMin > 0
-end
-
 local function pickupCandidates(free, origin)
 	local found = pickupFound
 	local seen = pickupSeen
@@ -1660,8 +1652,7 @@ local function pickupCandidates(free, origin)
 		end
 
 		-- Unbroken crystals (MinedHP > 0) need the One Hit breaker first;
-		-- without it the grab just fails, so skip them instead of spamming
-		-- prompts that can never pick.
+		-- without it the grab just fails, so skip them instead of spamming.
 		if not oneHit and tonumber(getAttr(child, "MinedHP") or 0) > 0 then
 			return
 		end
@@ -1796,9 +1787,8 @@ local function grabCrystal(inst, prompt)
 	local sent = false
 	local value = crystalValue(inst)
 
-	-- One-hit: burst-break the crystal first if it still has HP.
-	-- Runs on every pickup path (auto pickup, instant prompt,
-	-- collector, money farm) so it works anywhere, not just in-farm.
+	-- One-hit: burst-break the crystal first if it still has HP so the
+	-- grab below can succeed (also used by auto pickup / collectors).
 	if oneHit and tonumber(getAttr(inst, "MinedHP") or 0) > 0 then
 		burstBreak(inst)
 	end
@@ -2029,7 +2019,6 @@ local function pickupStep()
 	if grabs > 0 then
 		lastPickup = now
 	end
-
 	return grabs > 0
 end
 
@@ -3637,7 +3626,14 @@ do
 			Placeholder = "100k / 2m / 1b",
 			Numeric = false,
 			Finished = false,
-			Callback = setPickupMinValue,
+			Callback = function(text)
+				local parsed = parseValue(text)
+				if not parsed then
+					return
+				end
+				PICK.pickupMin = math.max(parsed, 0)
+				PICK.pickupFilter = PICK.pickupMin > 0
+			end,
 		})
 		PickupBox:AddLabel("Filters in Crystals tab (name / ratio / mutation) apply too", true)
 
@@ -5125,56 +5121,51 @@ do
 			}
 		end
 
-		local C = {
-	scanhold = 1.4,
-	peakgap = 10,
-	peakstep = 48,
-	peakrings = 12,
-	columnstep = 8,
-	ringmax = 6,
-	raytop = 120,
-	raydrop = 60,
-	zonepad = 12,
-	surfacegap = 0.15,
-	columndry = 40,
-	digburst = 7,
-	digsink = 1.2,
-	diglift = 6,
-	equipstep = 1,
-	sellmark = 0.5,
-	sellwait = 7,
-	digreach = 12,
-	digrefresh = 5,
-	collectrange = 60,
-	collectlift = 5,
-	collectgap = 0.15,
-	grabgap = 0.05,
-	searchgap = 2,
-	surfacegap = 0.4,
-	surfacehits = 20,
-	minedwell = 1.5,
-	rescan = 45,
-}
+		local SCAN_HOLD = 1.4
+		local PEAK_GAP = 10
+		local PEAK_STEP = 48
+		local PEAK_RINGS = 12
+		local COLUMN_STEP = 8
+		local RING_MAX = 6
+		local RAY_TOP = 120
+		local RAY_DROP = 60
+		local ZONE_PAD = 12
+		local SURFACE_GAP = 0.15
+		local COLUMN_DRY = 40
+		local DIG_BURST = 7
+		local DIG_SINK = 1.2
+		local DIG_LIFT = 6
+		local DIG_SLACK = 1.5
+		local DIG_AIM = 0.999
+		local EQUIP_STEP = 1
+		local SELL_MARK = 0.5
+		local SELL_WAIT = 7
+		local DIG_REACH = 12
+		local DIG_REFRESH = 5
+		local COLLECT_RANGE = 32000
+		local COLLECT_LIFT = 5
+		local COLLECT_GAP = 0.15
+		local GRAB_GAP = 0.05
 
-local OFFSETS = { Vector2.new(0, 0) }
+		local OFFSETS = { Vector2.new(0, 0) }
 		local PEAK_OFFSETS = { Vector2.new(0, 0) }
 
-		for ring = 1, C.ringmax do
+		for ring = 1, RING_MAX do
 			local slices = ring * 6
 
 			for slice = 0, slices - 1 do
 				local angle = slice / slices * math.pi * 2
-				local reach = ring * C.columnstep
+				local reach = ring * COLUMN_STEP
 				OFFSETS[#OFFSETS + 1] = Vector2.new(math.cos(angle) * reach, math.sin(angle) * reach)
 			end
 		end
 
-		for ring = 1, C.peakrings do
+		for ring = 1, PEAK_RINGS do
 			local slices = ring * 3
 
 			for slice = 0, slices - 1 do
 				local angle = slice / slices * math.pi * 2
-				local reach = ring * C.peakstep
+				local reach = ring * PEAK_STEP
 				PEAK_OFFSETS[#PEAK_OFFSETS + 1] =
 					Vector2.new(math.cos(angle) * reach, math.sin(angle) * reach)
 			end
@@ -5192,7 +5183,7 @@ local OFFSETS = { Vector2.new(0, 0) }
 		local digClock = 0
 
 		local function digFilter(now)
-			if digClock > 0 and now - digClock < C.digrefresh then
+			if digClock > 0 and now - digClock < DIG_REFRESH then
 				return
 			end
 
@@ -5217,7 +5208,7 @@ local OFFSETS = { Vector2.new(0, 0) }
 
 		local function pickReach(tool)
 			local override = tool and tonumber(getAttr(tool, "OverrideMaxReach"))
-			return (override or C.digreach) + 3
+			return (override or DIG_REACH) + 3
 		end
 
 		local function aimPoint(origin, spot, reach, now)
@@ -5260,6 +5251,10 @@ local OFFSETS = { Vector2.new(0, 0) }
 		local lootHp
 		local lootMax
 		local target
+		local columnY
+		local columnDry = 0
+		local columnSwings = 0
+		local surfaceClock = 0
 		local peakClock = 0
 		local scanIndex = 0
 		local scanUntil = 0
@@ -5270,13 +5265,13 @@ local OFFSETS = { Vector2.new(0, 0) }
 		local sellUntil = 0
 		local lootBlocked = false
 		local statusText = "Idle"
+		local barrenCycles = 0
+		local barrenWarpClock = 0
+		local minedYSet = {}
+		local targetSwings = 0
+		local depletedCells = {}
 		local lastPickupTime = os.clock()
 		local crystalDrought = 0
-		-- Farm state bundled in one table: install() sits at Luau's
-		-- 200-register limit, and each extra captured local tips it over
-		-- into a CompileError. (Same trick as the EXT table.)
-		local surfaceClock = 0
-		local surfaceHits = 0
 
 		local function toggleValue(name)
 			local store = Library and Library.Toggles
@@ -5317,17 +5312,17 @@ local OFFSETS = { Vector2.new(0, 0) }
 				return false
 			end
 
-			return (Vector2.new(x, z) - center).Magnitude <= mountainSpan() + C.zonepad
+			return (Vector2.new(x, z) - center).Magnitude <= mountainSpan() + ZONE_PAD
 		end
 
 		local function surfaceAt(x, z)
 			if not insideZone(x, z) then
 				-- Fallback: raycast from high above anywhere
 				local base = zoneBase()
-				local top = math.max(zonePeak(), 900) + C.raytop
+				local top = math.max(zonePeak(), 900) + RAY_TOP
 				local hit = Workspace:Raycast(
 					Vector3.new(x, top, z),
-					Vector3.new(0, -(top - base + C.raydrop), 0),
+					Vector3.new(0, -(top - base + RAY_DROP), 0),
 					surfaceParams
 				)
 				if hit and hit.Position.Y > base + 1 then
@@ -5343,10 +5338,10 @@ local OFFSETS = { Vector2.new(0, 0) }
 			end
 
 			local base = zoneBase()
-			local top = zonePeak() + C.raytop
+			local top = zonePeak() + RAY_TOP
 			local hit = Workspace:Raycast(
 				Vector3.new(x, top, z),
-				Vector3.new(0, -(top - base + C.raydrop), 0),
+				Vector3.new(0, -(top - base + RAY_DROP), 0),
 				surfaceParams
 			)
 
@@ -5382,7 +5377,7 @@ local OFFSETS = { Vector2.new(0, 0) }
 		local function pickTarget(origin, now)
 			local center = mountainSpot()
 
-			if center and now - peakClock >= C.peakgap then
+			if center and now - peakClock >= PEAK_GAP then
 				peakClock = now
 
 				local high = highestColumn(center, PEAK_OFFSETS)
@@ -5408,7 +5403,7 @@ local OFFSETS = { Vector2.new(0, 0) }
 			return Move.glide(goal, aim)
 		end
 
-		local function swing(spot, burst)
+		local function swing(spot)
 			local event = Farm.digEvent()
 			if not event or not heldPick then
 				return false
@@ -5423,16 +5418,9 @@ local OFFSETS = { Vector2.new(0, 0) }
 			end
 
 			return pcall(function()
-				if burst then
-					-- Crystal: concentrate all swings on it, no downward step.
-					for _ = 1, C.digburst do
-						event:FireServer(name, aim)
-					end
-					return
+				for step = 0, DIG_BURST - 1 do
+					event:FireServer(name, aim - Vector3.new(0, step * DIG_SINK, 0))
 				end
-
-				-- Surface: one hit only - never drills down.
-				event:FireServer(name, aim)
 			end)
 		end
 
@@ -5466,7 +5454,7 @@ local OFFSETS = { Vector2.new(0, 0) }
 				end
 
 				local distance = (inst.Position - origin).Magnitude
-				if distance > C.collectrange then
+				if distance > COLLECT_RANGE then
 					return
 				end
 
@@ -5475,9 +5463,9 @@ local OFFSETS = { Vector2.new(0, 0) }
 					return
 				end
 
-				local better = not best or distance < bestDistance
+				local better = not best or value > bestValue
 
-				if not better and distance == bestDistance and value > bestValue then
+				if not better and value == bestValue and distance < bestDistance then
 					better = true
 				end
 
@@ -5512,6 +5500,7 @@ local OFFSETS = { Vector2.new(0, 0) }
 		local function stop()
 			active = false
 			target = nil
+			columnY = nil
 			loaded = false
 			Move.glideStop()
 			scanIndex = 0
@@ -5523,8 +5512,12 @@ local OFFSETS = { Vector2.new(0, 0) }
 			sellUntil = 0
 			heldPick = nil
 			statusText = "Idle"
+			barrenCycles = 0
+			targetSwings = 0
 			crystalDrought = 0
 			lastPickupTime = os.clock()
+			table.clear(minedYSet)
+			table.clear(depletedCells)
 
 			Move.setFly(toggleValue("Fly"))
 			Move.setNoclip(toggleValue("Noclip"))
@@ -5543,7 +5536,7 @@ local OFFSETS = { Vector2.new(0, 0) }
 			if not loaded then
 				if scanIndex == 0 then
 					scanIndex = 1
-					scanUntil = now + C.scanhold
+					scanUntil = now + SCAN_HOLD
 				end
 
 				local spots = moneyDynamicSpots()
@@ -5553,7 +5546,7 @@ local OFFSETS = { Vector2.new(0, 0) }
 
 					if now >= scanUntil then
 						scanIndex += 1
-						scanUntil = now + C.scanhold
+						scanUntil = now + SCAN_HOLD
 					end
 
 					return
@@ -5577,14 +5570,16 @@ local OFFSETS = { Vector2.new(0, 0) }
 				end
 
 				target = nil
+				columnY = nil
+				surfaceClock = 0
 			end
 
-			if autoSell and (bagRatio() >= C.sellmark or lootBlocked) then
+			if autoSell and (bagRatio() >= SELL_MARK or lootBlocked) then
 				sellSpot = root.CFrame
 
 				if doSell() then
 					lootBlocked = false
-					sellUntil = now + C.sellwait
+					sellUntil = now + SELL_WAIT
 					statusText = "Selling"
 					return
 				end
@@ -5599,7 +5594,7 @@ local OFFSETS = { Vector2.new(0, 0) }
 				heldPick = Farm.equipPick()
 			else
 				equipClock += deltaTime
-				if equipClock >= C.equipstep then
+				if equipClock >= EQUIP_STEP then
 					equipClock = 0
 					heldPick = Farm.equipPick() or heldPick
 				end
@@ -5612,19 +5607,27 @@ local OFFSETS = { Vector2.new(0, 0) }
 
 			swingClock += deltaTime
 
-			local swingNeed = math.max(oneHit and 0.1 or 0.02, Farm.swingGap(heldPick) * 0.4)
+			local swingNeed = math.max(0.02, Farm.swingGap(heldPick) * 0.4)
 			local canSwing = swingClock >= swingNeed
 			local free = backpackFree()
 
-			-- Simple loop: scan for crystals and collect them; when none are
-			-- around, dig the mountain surface locally to spawn more.
 			if loot and (not loot.Parent or getAttr(loot, "Collected") == true) then
 				loot = nil
 				lootHp = nil
 				lootMax = nil
 			end
 
-			if not loot and now - lootClock >= C.collectgap then
+			if loot then
+				local hp = tonumber(getAttr(loot, "MinedHP"))
+
+				if hp and (lootMax == nil or hp > lootMax) then
+					lootMax = hp
+				end
+
+				lootHp = hp
+			end
+
+			if not loot and now - lootClock >= COLLECT_GAP then
 				lootClock = now
 				loot, lootBlocked = findLoot(free, root.Position)
 
@@ -5637,9 +5640,7 @@ local OFFSETS = { Vector2.new(0, 0) }
 			if loot then
 				local spot = loot.Position
 
-				if not oneHit then
-					holdAt(CFrame.new(spot + Vector3.new(0, C.collectlift, 0), spot), spot)
-				end
+				holdAt(CFrame.new(spot + Vector3.new(0, COLLECT_LIFT, 0), spot), spot)
 
 				local digSpot = spot
 
@@ -5655,25 +5656,16 @@ local OFFSETS = { Vector2.new(0, 0) }
 
 				if canSwing then
 					swingClock -= swingNeed
-					swing(digSpot, true)
+					swing(digSpot)
 				end
 
-				if now - grabClock >= C.grabgap then
+				if now - grabClock >= GRAB_GAP then
 					grabClock = now
-
 					if grabCrystal(loot, crystalPrompt(loot)) then
 						lastPickupTime = now
 						crystalDrought = 0
 					end
 				end
-
-				local hp = tonumber(getAttr(loot, "MinedHP"))
-
-				if hp and (lootMax == nil or hp > lootMax) then
-					lootMax = hp
-				end
-
-				lootHp = hp
 
 				if lootHp and lootHp > 0 then
 					local ratio = 0
@@ -5690,53 +5682,153 @@ local OFFSETS = { Vector2.new(0, 0) }
 				return
 			end
 
-			-- No loot: dig the surface around the mountain center so
-			-- crystals respawn. Tight radius, never straight down, and
-			-- rotate only after enough swings at a spot.
+			local origin = farmOrigin(root)
+
+			if target and now - surfaceClock >= SURFACE_GAP then
+				surfaceClock = now
+
+				local spot = surfaceAt(target.X, target.Z)
+
+				if not spot then
+					-- Surface gone — mark depleted & warp
+					local cellKey = string.format("%d,%d", math.floor(target.X / 20), math.floor(target.Z / 20))
+					depletedCells[cellKey] = true
+					target = nil
+					columnY = nil
+					columnDry = 0
+					columnSwings = 0
+					targetSwings = 0
+					local ms = mountainSpot() or origin
+					local drift = ms + Vector3.new(math.random(-80, 80), 20, math.random(-80, 80))
+					teleportTo(drift)
+					statusText = "Surface gone, warping..."
+					task.wait(0.3)
+					return
+				else
+					if not columnY or spot.Y < columnY - 0.05 then
+						columnDry = 0
+					else
+						columnDry += columnSwings
+					end
+
+					columnSwings = 0
+					columnY = spot.Y
+					target = spot
+
+					-- Total swing cap: if we've swung 200+ times at this target, it's depleted
+					if targetSwings >= 200 then
+						local cellKey = string.format("%d,%d", math.floor(spot.X / 20), math.floor(spot.Z / 20))
+						depletedCells[cellKey] = true
+						target = nil; columnY = nil; columnDry = 0; columnSwings = 0; targetSwings = 0
+						local ms = mountainSpot() or origin
+						local drift = ms + Vector3.new(math.random(-80, 80), 20, math.random(-80, 80))
+						teleportTo(drift)
+						statusText = "Column depleted, moving..."
+						task.wait(0.3)
+						return
+					end
+
+					if columnDry >= COLUMN_DRY then
+						local consumed = math.floor(spot.Y / 10) * 10
+						minedYSet[consumed] = true
+						target = nil; columnY = nil; columnDry = 0; columnSwings = 0; targetSwings = 0
+						local ms = mountainSpot() or origin
+						local drift = ms + Vector3.new(math.random(-60, 60), math.random(20, 80), math.random(-60, 60))
+						teleportTo(drift)
+						statusText = "Column dry, moving..."
+						task.wait(0.3)
+						return
+					end
+				end
+			end
+
 			if not target then
-				if now - surfaceClock >= C.surfacegap then
-					surfaceClock = now
+				local spot = pickTarget(origin, now)
 
-					local ms = mountainSpot() or root.Position
-					local span = 30
-
-					for _ = 1, 6 do
-						local hit = surfaceAt(ms.X + math.random(-span, span), ms.Z + math.random(-span, span))
-						if hit and (hit.Position - root.Position).Magnitude >= 4 then
-							target = hit
-							break
-						end
-					end
-
-					if not target then
-						local angle = math.random() * math.pi * 2
-						local dist = 8 + math.random() * span
-						target = ms + Vector3.new(math.cos(angle) * dist, 0, math.sin(angle) * dist)
-					end
-				end
-			end
-
-			if target then
-				holdAt(CFrame.new(target + Vector3.new(0, C.diglift, 0), target), target)
-
-				if canSwing then
-					swingClock -= swingNeed
-					swing(target)
-
-					surfaceHits += 1
-
-					if surfaceHits >= C.surfacehits then
-						surfaceHits = 0
-						target = nil
-						surfaceClock = 0
-					end
+				if not spot then
+					spot = surfaceAt(origin.X, origin.Z)
 				end
 
-				statusText = "Mining surface..."
-			else
-				statusText = "No crystals nearby"
+				if not spot then
+					barrenCycles += 1
+
+					if barrenCycles >= 5 then
+						local ms = mountainSpot() or origin
+						local warpPos = ms + Vector3.new(math.random(-120, 120), 30, math.random(-120, 120))
+						teleportTo(warpPos)
+						requestStream(warpPos)
+						statusText = "No surface, warping..."
+						task.wait(0.5)
+						barrenCycles = 0
+						return
+					end
+
+					if barrenCycles >= 12 then
+						Library:Notify("Mountain depleted, hopping server", 3)
+						Net.hop()
+						stop()
+						return
+					end
+
+					requestStream(origin)
+					local ms = mountainSpot() or origin
+					local drift = ms + Vector3.new(math.random(-60, 60), 30, math.random(-60, 60))
+					teleportTo(drift)
+					statusText = "Searching surface..."
+					return
+				end
+
+				barrenCycles = 0
+
+				-- Skip this cell if already depleted
+				local cellKey = string.format("%d,%d", math.floor(spot.X / 20), math.floor(spot.Z / 20))
+				if depletedCells[cellKey] then
+					target = nil
+					statusText = "Skipping depleted cell..."
+					task.wait(0.2)
+					return
+				end
+
+				if columnY then
+					local yKey = math.floor(columnY / 10) * 10
+					minedYSet[yKey] = true
+				end
+
+				target = spot
+				columnY = spot.Y
+				columnDry = 0
+				columnSwings = 0
+				targetSwings = 0
+				surfaceClock = now
 			end
+
+			-- Crystal drought detection: if mining 20s+ without pickup, spot is dry
+			crystalDrought = now - lastPickupTime
+			if crystalDrought >= 20 and targetSwings > 5 then
+				local cellKey = string.format("%d,%d", math.floor(target.X / 20), math.floor(target.Z / 20))
+				depletedCells[cellKey] = true
+				target = nil; columnY = nil; columnDry = 0; columnSwings = 0; targetSwings = 0; crystalDrought = 0
+				lastPickupTime = now
+				local ms = mountainSpot() or origin
+				local drift = ms + Vector3.new(math.random(-80, 80), 20, math.random(-80, 80))
+				teleportTo(drift)
+				statusText = "No crystals for 20s, moving..."
+				task.wait(0.3)
+				return
+			end
+
+			holdAt(CFrame.new(target + Vector3.new(0, DIG_LIFT, 0), target), target)
+
+			if canSwing then
+				swingClock -= swingNeed
+				columnSwings += 1
+				targetSwings += 1
+				swing(target)
+			end
+
+			statusText = string.format("Mining surface at %dm", math.floor(target.Y))
 		end
+
 		local function setActive(value)
 			if not value then
 				stop()
@@ -5745,6 +5837,10 @@ local OFFSETS = { Vector2.new(0, 0) }
 
 			active = true
 			target = nil
+			columnY = nil
+			columnDry = 0
+			columnSwings = 0
+			surfaceClock = 0
 			peakClock = 0
 			scanIndex = 0
 			scanUntil = 0
@@ -5760,22 +5856,21 @@ local OFFSETS = { Vector2.new(0, 0) }
 			sellUntil = 0
 			heldPick = nil
 			statusText = "Starting"
+			barrenCycles = 0
+			targetSwings = 0
 			crystalDrought = 0
 			lastPickupTime = os.clock()
-			target = nil
-			surfaceClock = 0
-			surfaceHits = 0
+			table.clear(minedYSet)
+			table.clear(depletedCells)
 
 			Move.setFly(false)
 			Move.setNoclip(true)
 			Mountain.setAutoGrab(true)
 		end
 
-	end
-
 		local MoneyBox = Tabs.farming:AddRightGroupbox("Money Farm", "banknote")
 
-		MoneyBox:AddLabel("Mines surface lightly & collects nearby crystals", true)
+		MoneyBox:AddLabel("Loads the mountain and digs from the peak downwards", true)
 		MoneyBox:AddDivider()
 
 		MoneyBox:AddToggle("AutoFarmMoney", {
@@ -5813,6 +5908,9 @@ local OFFSETS = { Vector2.new(0, 0) }
 		end)
 
 		Money.stop = stop
+	end
+
+	install()
 end
 
 do
