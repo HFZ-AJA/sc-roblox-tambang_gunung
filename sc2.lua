@@ -163,6 +163,10 @@ local PICK = {
 	instantRadius = 60,
 	instantTick = 0.25,
 	oneHitBurst = 150,
+	-- Min interval between burstBreak volleys (150 dig remotes each).
+	-- Prevents ~9000 remote calls/sec spam while breaking crystals.
+	breakGap = 0.35,
+	breakClock = 0,
 	pickupMin = 0,
 	pickupFilter = false,
 }
@@ -1767,6 +1771,15 @@ DIG_NAMES = { "DigRequest", "Dig", "Mine", "Swing", "MineRequest", "SwingRequest
 -- One-hit: fire the dig remote in a big burst at the crystal so the
 -- total damage exceeds MinedHP with any pickaxe.
 function burstBreak(inst)
+	-- Shared throttle: every caller (grab, auto pickup, money farm,
+	-- collector) goes through here, so a 150-dig volley fires at most
+	-- every PICK.breakGap seconds instead of every frame.
+	local now = os.clock()
+	if now - PICK.breakClock < PICK.breakGap then
+		return false
+	end
+	PICK.breakClock = now
+
 	local event
 	for _, name in ipairs(DIG_NAMES) do
 		local r = findRemote(name)
@@ -5693,7 +5706,8 @@ do
 				-- Crystals below the character (in holes) must be burst-broken
 				-- at their own position. aimPoint would raycast into the
 				-- ceiling above them, so the farm would never break them and
-				-- would get stuck on this loot forever.
+				-- would get stuck on this loot forever. burstBreak throttles
+				-- itself (PICK.breakGap), so this is safe every frame.
 				if lootHp and lootHp > 0 then
 					burstBreak(loot)
 				end
@@ -5718,6 +5732,9 @@ do
 					if grabCrystal(loot, crystalPrompt(loot)) then
 						lastPickupTime = now
 						crystalDrought = 0
+						-- Restart the stuck timer: progress was made, so the
+						-- 8s guard should count from this grab, not the find.
+						lootClock = now
 					end
 				end
 
@@ -5759,7 +5776,7 @@ do
 				local spot = surfaceAt(target.X, target.Z)
 
 				if not spot then
-					-- Surface gone â€” mark depleted & warp
+					-- Surface gone — mark depleted & warp
 					local cellKey = string.format("%d,%d", math.floor(target.X / 20), math.floor(target.Z / 20))
 					depletedCells[cellKey] = true
 					target = nil
@@ -5828,7 +5845,9 @@ do
 						requestStream(warpPos)
 						statusText = "No surface, warping..."
 						task.wait(0.5)
-						barrenCycles = 0
+						-- NOTE: do not reset barrenCycles here. >= 5 warps and
+						-- keeps counting so >= 12 can hop server when the
+						-- mountain is truly gone.
 						return
 					end
 
@@ -6195,7 +6214,7 @@ do
 						teleportTo(EXT.collectorTarget)
 						return
 					end
-					-- Close enough â€” grab directly
+					-- Close enough — grab directly
 					grabCrystal(EXT.collectorTarget, crystalPrompt(EXT.collectorTarget))
 					EXT.collectorTarget = nil
 					return
@@ -6684,7 +6703,7 @@ do
 			label.Name = "PointerLabel"
 			label.Size = UDim2.new(1, 0, 1, 0)
 			label.BackgroundTransparency = 1
-			label.Text = "â–²"
+			label.Text = "▲"
 			label.TextColor3 = Color3.fromRGB(255, 255, 255)
 			label.TextScaled = true
 			label.Font = Enum.Font.GothamBold
@@ -6714,7 +6733,7 @@ do
 			local val = formatShort(bestValue, "$")
 			EXT.pointerGui.Rotation = math.deg(angle)
 			local label = EXT.pointerGui:FindFirstChild("PointerLabel")
-			if label then label.Text = string.format("â–²\n%s\n%s", val, dist) end
+			if label then label.Text = string.format("▲\n%s\n%s", val, dist) end
 		end
 
 		-- 6) Auto Rebirth
