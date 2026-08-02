@@ -1627,7 +1627,9 @@ local pickupSeen = {}
 -- Shared pickup gate: single filter source for AutoPickup, Instant Grab
 -- and Money Farm, so the Pickup menu stays in sync with farming.
 -- Returns true, or false with a reason ("weight" = bag can't fit it).
-local function pickGate(inst, value, free)
+-- Stored on PICK (not a file-scope local): the main chunk sits right at
+-- Luau's 200-register limit, extra locals tip it over (CompileError).
+PICK.pickGate = function(inst, value, free)
 	if not inst.Parent or not isCrystal(inst) or getAttr(inst, "Collected") == true then
 		return false
 	end
@@ -1685,7 +1687,7 @@ local function pickupCandidates(free, origin)
 
 		local value = crystalValue(child)
 
-		local ok = pickGate(child, value, free)
+		local ok = PICK.pickGate(child, value, free)
 		if not ok then
 			return
 		end
@@ -5082,6 +5084,14 @@ do
 end
 
 local Money = {}
+
+-- Pre-farm Pickup menu state. Stored as field on Money (not a file-scope
+-- local): main chunk and Money install() both sit at Luau's 200-register
+-- limit, extra locals tip them over (CompileError).
+Money.pickupSync = {
+	pickup = false,
+	rune = false,
+}
 local moneyConn
 
 do
@@ -5293,10 +5303,6 @@ do
 		local lastPickupTime = os.clock()
 		local crystalDrought = 0
 
-		-- Pre-farm Pickup menu state, restored on stop so toggles stay honest
-		local startAutoPickup = false
-		local startAutoRune = false
-
 		local function toggleValue(name)
 			local store = Library and Library.Toggles
 			local entry = store and store[name]
@@ -5482,7 +5488,7 @@ do
 				local value = crystalValue(inst)
 
 				-- Same gate as AutoPickup: Pickup menu filters apply to the farm.
-				local ok, reason = pickGate(inst, value, free)
+				local ok, reason = PICK.pickGate(inst, value, free)
 
 				if not ok then
 					if reason == "weight" then
@@ -5558,10 +5564,10 @@ do
 				end
 			end
 
-			restoreToggle("AutoPickup", startAutoPickup)
-			restoreToggle("AutoRunePickup", startAutoRune)
-			autoPickupActive = startAutoPickup
-			Mountain.setAutoGrab(startAutoRune)
+			restoreToggle("AutoPickup", Money.pickupSync.pickup)
+			restoreToggle("AutoRunePickup", Money.pickupSync.rune)
+			autoPickupActive = Money.pickupSync.pickup
+			Mountain.setAutoGrab(Money.pickupSync.rune)
 		end
 
 		local function step(deltaTime)
@@ -5753,7 +5759,7 @@ do
 				local spot = surfaceAt(target.X, target.Z)
 
 				if not spot then
-					-- Surface gone — mark depleted & warp
+					-- Surface gone â€” mark depleted & warp
 					local cellKey = string.format("%d,%d", math.floor(target.X / 20), math.floor(target.Z / 20))
 					depletedCells[cellKey] = true
 					target = nil
@@ -5931,8 +5937,8 @@ do
 
 			-- Sync Pickup menu: farm needs pickup + rune grab, remember prior
 			-- toggle state so stop() can restore it.
-			startAutoPickup = toggleValue("AutoPickup")
-			startAutoRune = toggleValue("AutoRunePickup")
+			Money.pickupSync.pickup = toggleValue("AutoPickup")
+			Money.pickupSync.rune = toggleValue("AutoRunePickup")
 
 			local function forceToggle(name)
 				local entry = Library and Library.Toggles and Library.Toggles[name]
@@ -6189,7 +6195,7 @@ do
 						teleportTo(EXT.collectorTarget)
 						return
 					end
-					-- Close enough — grab directly
+					-- Close enough â€” grab directly
 					grabCrystal(EXT.collectorTarget, crystalPrompt(EXT.collectorTarget))
 					EXT.collectorTarget = nil
 					return
@@ -6678,7 +6684,7 @@ do
 			label.Name = "PointerLabel"
 			label.Size = UDim2.new(1, 0, 1, 0)
 			label.BackgroundTransparency = 1
-			label.Text = "▲"
+			label.Text = "â–²"
 			label.TextColor3 = Color3.fromRGB(255, 255, 255)
 			label.TextScaled = true
 			label.Font = Enum.Font.GothamBold
@@ -6708,7 +6714,7 @@ do
 			local val = formatShort(bestValue, "$")
 			EXT.pointerGui.Rotation = math.deg(angle)
 			local label = EXT.pointerGui:FindFirstChild("PointerLabel")
-			if label then label.Text = string.format("▲\n%s\n%s", val, dist) end
+			if label then label.Text = string.format("â–²\n%s\n%s", val, dist) end
 		end
 
 		-- 6) Auto Rebirth
