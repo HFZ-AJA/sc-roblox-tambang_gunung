@@ -362,7 +362,7 @@ local EXT = {
 	ratioFilter = false, minRatio = 100,
 	mutBlacklist = {},
 	rebirth = false, rebirthClock = 0, rebirthRemote = nil,
-	pointer = false, pointerGui = nil, pointerTarget = nil,
+	pointer = false, pointerGui = nil, pointerTarget = nil, pointerClock = 0,
 	soundAlert = false, soundObj = nil,
 	serverHud = false, serverHudGui = nil, serverHudClock = 0,
 	farmSched = false, schedDuration = 3600, schedPause = 300, schedPhase = "idle", schedTimer = 0,
@@ -379,6 +379,7 @@ local lastBagWarn = 0
 local instantPromptActive = false
 local instantPatched = {}
 local instantAccumulator = math.huge
+local instantBagWarn = 0
 
 local function reportError(context, err)
 	local now = os.clock()
@@ -2002,16 +2003,27 @@ local function refreshInstantPrompts()
 		end
 	end
 
+	-- No bag space = nothing worth patching.
+	local free = backpackFree()
+	if free <= 0 then
+		return
+	end
+
 	local hits = nearbyCrystalParts(root.Position, PICK.instantRadius)
 	if not hits then
 		return
 	end
 
 	for _, part in ipairs(hits) do
-		if isCrystal(part) and getAttr(part, "Collected") ~= true then
-			local prompt = crystalPrompt(part)
-			if prompt then
-				instantPromptPatch(prompt)
+		if part.Parent and isCrystal(part) and getAttr(part, "Collected") ~= true then
+			-- Same gate as AutoPickup: only patch prompts the E-grab could
+			-- actually use, so we never touch crystals the server would
+			-- reject (unbroken without one-hit, filtered out, too heavy...).
+			if PICK.pickGate(part, crystalValue(part), free) then
+				local prompt = crystalPrompt(part)
+				if prompt then
+					instantPromptPatch(prompt)
+				end
 			end
 		end
 	end
@@ -2036,6 +2048,15 @@ local function instantGrab()
 		return
 	end
 
+	local free = backpackFree()
+	if free <= 0 then
+		if os.clock() - instantBagWarn >= 8 then
+			instantBagWarn = os.clock()
+			Library:Notify("Backpack full", 2)
+		end
+		return
+	end
+
 	local hits = nearbyCrystalParts(root.Position, PICK.range + PICK.pad)
 	if not hits then
 		return
@@ -2045,11 +2066,16 @@ local function instantGrab()
 
 	for _, part in ipairs(hits) do
 		if part.Parent and isCrystal(part) and getAttr(part, "Collected") ~= true then
-			local distance = surfaceDistance(part, root.Position)
-			if distance <= PICK.range and (not best or distance < bestDistance) then
-				best = part
-				bestPrompt = crystalPrompt(part)
-				bestDistance = distance
+			-- Same gate as AutoPickup: value/ratio/mutation/name filters and
+			-- the one-hit requirement apply here too, so E never attempts a
+			-- grab the server would reject (and stats/webhooks stay honest).
+			if PICK.pickGate(part, crystalValue(part), free) then
+				local distance = surfaceDistance(part, root.Position)
+				if distance <= PICK.range and (not best or distance < bestDistance) then
+					best = part
+					bestPrompt = crystalPrompt(part)
+					bestDistance = distance
+				end
 			end
 		end
 	end
@@ -2496,7 +2522,7 @@ local HOME_REMOTES = { "GoHome", "TeleportHome", "Home", "ReturnHome", "Spawn" }
 local function resolveHome()
 	if GoHome and GoHome.Parent then return GoHome end
 	for _, name in ipairs(HOME_REMOTES) do
-		local r = findRemote(name)
+		local r = findRemote(name, true)
 		if r then GoHome = r; return r end
 	end
 	return nil
@@ -2505,7 +2531,7 @@ end
 local function resolveSell()
 	if SellRequest and SellRequest.Parent then return SellRequest end
 	for _, name in ipairs(SELL_REMOTES) do
-		local r = findRemote(name)
+		local r = findRemote(name, true)
 		if r then SellRequest = r; return r end
 	end
 	return nil
@@ -6328,6 +6354,15 @@ do
 			if not EXT.collector then return end
 			local now = os.clock()
 			if now - EXT.collectorClock < 0.35 then return end
+
+			-- Forget stale grab claims. pickupStep only cleans these when
+			-- AutoPickup is on; collector runs standalone, so it must too or
+			-- the claimed table grows forever on long sessions.
+			for inst, stamp in pairs(claimed) do
+				if now - stamp >= PICK.forget or not inst.Parent then
+					claimed[inst] = nil
+				end
+			end
 			EXT.collectorClock = now
 
 			local root = getRoot()
@@ -6352,6 +6387,7 @@ do
 					end
 					-- Close enough — grab directly
 					grabCrystal(EXT.collectorTarget, crystalPrompt(EXT.collectorTarget))
+					claimed[EXT.collectorTarget] = now
 					EXT.collectorTarget = nil
 					return
 				end
@@ -6366,6 +6402,11 @@ do
 				local v = crystalValue(inst)
 				if not meetsFilter(inst, v) then return end
 				if EXT.nameFiltered and EXT.nameFiltered(inst) then return end
+				-- Recently attempted: skip for 3s so a stuck/unreachable
+				-- crystal does not lock the collector into an infinite
+				-- teleport-grab loop (it works other crystals meanwhile).
+				local last = claimed[inst]
+				if last and now - last < 3 then return end
 				local w = crystalWeight(inst)
 				if not w or w > free then return end
 				local d = (inst.Position - root.Position).Magnitude
@@ -7347,13 +7388,22 @@ do
 			local runes = backpackRunes()
 			if #runes == 0 then return end
 
-			-- Plant ALL runes from backpack (allow stacking)
-			local toPlant = runes[1]
+			-- Plant the first rune that is not already planted server-side.
+			-- alreadyActive checks the plot's active runes; without this the
+			-- same rune gets re-equipped and re-fired every 5s forever.
+			local toPlant
+			for _, rune in ipairs(runes) do
+				if not alreadyActive(runeTitle(rune)) then
+					toPlant = rune
+					break
+				end
+			end
+			if not toPlant then return end
 
 			-- Find remote
 			if not plantRuneRemote or not plantRuneRemote.Parent then
 				for _, n in ipairs(PLANT_REMOTES) do
-					local r = findRemote(n)
+					local r = findRemote(n, true)
 					if r then plantRuneRemote = r; break end
 				end
 			end
@@ -7426,8 +7476,8 @@ do
 				if EXT.serverHudClock >= 2 then EXT.serverHudClock = 0; task.spawn(hudUpdate) end
 			end
 			if EXT.pointer then
-				EXT.boostClock = EXT.boostClock + dt -- repurpose as pointer timer
-				if EXT.boostClock >= 0.3 then EXT.boostClock = 0; pointerUpdate() end
+				EXT.pointerClock = EXT.pointerClock + dt
+				if EXT.pointerClock >= 0.3 then EXT.pointerClock = 0; pointerUpdate() end
 			end
 			if EXT.soundObj and not EXT.soundObj.Playing then
 				EXT.soundObj:Destroy(); EXT.soundObj = nil
