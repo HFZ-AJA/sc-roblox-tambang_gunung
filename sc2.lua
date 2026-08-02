@@ -401,8 +401,8 @@ local function formatShort(n, prefix)
 
 	local index = 0
 	while n >= 1000 and index < #SUFFIXES - 1 do
-		n /= 1000
-		index += 1
+		n = n / 1000
+		index = index + 1
 	end
 
 	return string.format("%s%s%.2f%s", sign, prefix, n, SUFFIXES[index + 1])
@@ -570,19 +570,19 @@ local function combinedLuckMult(inst)
 	if type(extra) == "string" and extra ~= "" then
 		for name in string.gmatch(extra, "[^,]+") do
 			if name ~= "" then
-				multiplier *= mutationLuck(name)
+				multiplier = multiplier * mutationLuck(name)
 			end
 		end
 	end
 
 	if getAttr(inst, "IsBloodCrystal") == true then
-		multiplier *= LUCK.blood
+		multiplier = multiplier * LUCK.blood
 	end
 
 	if getAttr(inst, "AdminMutation") == "Radioactive" and mutation ~= "Radioactive" then
 		local hasRadioactive = type(extra) == "string" and extra:find("Radioactive", 1, true) ~= nil
 		if not hasRadioactive then
-			multiplier *= mutationLuck("Radioactive")
+			multiplier = multiplier * mutationLuck("Radioactive")
 		end
 	end
 
@@ -599,7 +599,7 @@ local function computeLuck(inst)
 	local base = (LUCK.rarity[tier] or LUCK.rarity[1]) * math.min(weight, LUCK.cap) ^ LUCK.exponent * LUCK.base
 
 	if getAttr(inst, "BombCrystal") == true then
-		base *= LUCK.bomb
+		base = base * LUCK.bomb
 	end
 
 	return base * combinedLuckMult(inst)
@@ -693,7 +693,7 @@ local function backpackCapacity()
 
 	local base = realStat("CarryWeight") or 10
 	if ownsGamepass("CarryKgPlus4") then
-		base *= 4
+		base = base * 4
 	end
 
 	local total = base + (realStat("CarryWeightBonus") or 0)
@@ -716,7 +716,7 @@ local function backpackWeight()
 			if child:IsA("Tool") and getAttr(child, "Tier") ~= nil then
 				local kg = tonumber(getAttr(child, "WeightKg"))
 				if kg then
-					total += kg
+					total = total + kg
 				end
 			end
 		end
@@ -895,7 +895,7 @@ local function destroyEntry(inst, entry)
 	end
 
 	espCache[inst] = nil
-	espCount -= 1
+	espCount = espCount - 1
 	statsDirty = true
 end
 
@@ -998,7 +998,7 @@ local function untrackCrystal(inst)
 	end
 
 	registry[inst] = nil
-	registryCount -= 1
+	registryCount = registryCount - 1
 	dirty[inst] = nil
 	candidates[inst] = nil
 	statsDirty = true
@@ -1013,7 +1013,7 @@ local function trackCrystal(inst)
 
 	local conns = {}
 	registry[inst] = conns
-	registryCount += 1
+	registryCount = registryCount + 1
 	statsDirty = true
 
 	local ok = pcall(function()
@@ -1084,7 +1084,7 @@ local function syncCrystal(inst)
 
 		entry = result
 		espCache[inst] = entry
-		espCount += 1
+		espCount = espCount + 1
 		statsDirty = true
 	end
 
@@ -1281,7 +1281,7 @@ local espConn = RunService.Heartbeat:Connect(function(deltaTime)
 	end
 	end
 
-	sweepAccumulator += deltaTime
+	sweepAccumulator = sweepAccumulator + deltaTime
 	if sweepAccumulator >= ESP.sweep then
 		sweepAccumulator = 0
 		local ok, err = pcall(function()
@@ -1293,7 +1293,7 @@ local espConn = RunService.Heartbeat:Connect(function(deltaTime)
 		end
 	end
 
-	distanceAccumulator += deltaTime
+	distanceAccumulator = distanceAccumulator + deltaTime
 	if distanceAccumulator >= PACE.distance then
 		distanceAccumulator = 0
 		local ok, err = pcall(updateDistances)
@@ -1910,8 +1910,8 @@ local function grabCrystal(inst, prompt)
 
 	-- Track session stats
 	if sent then
-		EXT.picked += 1
-		EXT.earned += value
+		EXT.picked = EXT.picked + 1
+		EXT.earned = EXT.earned + value
 
 		-- Sound alert for rare finds (Mythic+)
 		local tier = crystalTier(inst)
@@ -2104,8 +2104,8 @@ local function pickupStep()
 			claimed[entry.inst] = now
 
 			if grabCrystal(entry.inst, entry.prompt) then
-				budget -= entry.weight
-				grabs += 1
+				budget = budget - entry.weight
+				grabs = grabs + 1
 			end
 		end
 	end
@@ -2221,7 +2221,7 @@ local schedulerConn = RunService.Heartbeat:Connect(function(deltaTime)
 	end
 
 	if instantPromptActive then
-		instantAccumulator += deltaTime
+		instantAccumulator = instantAccumulator + deltaTime
 		if instantAccumulator >= PICK.instantTick then
 			instantAccumulator = 0
 			local ok, err = pcall(refreshInstantPrompts)
@@ -2247,7 +2247,7 @@ local schedulerConn = RunService.Heartbeat:Connect(function(deltaTime)
 		end
 	end
 
-	statsAccumulator += deltaTime
+	statsAccumulator = statsAccumulator + deltaTime
 	if statsAccumulator >= PACE.stats then
 		statsAccumulator = 0
 		local ok, err = pcall(updateBackpackLabel)
@@ -2430,7 +2430,7 @@ local function unfavoriteAll()
 					child:SetAttribute("Favorited", false)
 				end)
 				fireRemote(ToggleFavorite, child, false)
-				cleared += 1
+				cleared = cleared + 1
 			end
 		end
 	end
@@ -2898,7 +2898,7 @@ do
 				grabbed[prompt] = now
 
 				if firePrompt(prompt) then
-					fired += 1
+					fired = fired + 1
 					Library:Notify(string.format("Rune: %s", runeTitle(owner)), 2)
 				end
 			end)
@@ -2965,7 +2965,7 @@ do
 			local count = 0
 
 			eachRune(root.Position, radius or GRAB_RANGE, function()
-				count += 1
+				count = count + 1
 			end)
 
 			return count
@@ -2981,7 +2981,7 @@ do
 
 		mountainConn = RunService.Heartbeat:Connect(function(deltaTime)
 			if boulderEsp then
-				boulderClock += deltaTime
+				boulderClock = boulderClock + deltaTime
 				if boulderClock >= BOULDER_STEP then
 					boulderClock = 0
 					local ok, err = pcall(syncBoulders)
@@ -2992,7 +2992,7 @@ do
 			end
 
 			if autoGrab then
-				grabClock += deltaTime
+				grabClock = grabClock + deltaTime
 				if grabClock >= GRAB_STEP then
 					grabClock = 0
 					local ok, err = pcall(grabRunes)
@@ -3115,11 +3115,11 @@ do
 				for _, entry in ipairs(FLY_KEYS) do
 					if UserInputService:IsKeyDown(entry.key) then
 						if entry.axis == "look" then
-							direction += frame.LookVector * entry.sign
+							direction = direction + frame.LookVector * entry.sign
 						elseif entry.axis == "right" then
-							direction += frame.RightVector * entry.sign
+							direction = direction + frame.RightVector * entry.sign
 						else
-							direction += Vector3.yAxis * entry.sign
+							direction = direction + Vector3.yAxis * entry.sign
 						end
 					end
 				end
@@ -3403,10 +3403,10 @@ do
 			if delta.Magnitude <= math.max(span, SNAP_GAP) then
 				cursor = goalFrame.Position
 			else
-				cursor += delta.Unit * span
+				cursor = cursor + delta.Unit * span
 			end
 
-			streamClock += deltaTime
+			streamClock = streamClock + deltaTime
 			if streamClock >= STREAM_GAP then
 				streamClock = 0
 				requestStream(goalFrame.Position)
@@ -3916,7 +3916,7 @@ do
 			local link = string.format("https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Desc&excludeFullGames=true&limit=100", PLACE)
 
 			if type(cursor) == "string" and cursor ~= "" then
-				link ..= "&cursor=" .. cursor
+				link = link .. "&cursor=" .. cursor
 			end
 
 			local body, code = grab(link)
@@ -4271,7 +4271,7 @@ do
 			local score = 1
 			local power = tonumber(getAttr(tool, "DigPower"))
 			if power then
-				score += power
+				score = score + power
 			end
 
 			return score
@@ -4802,7 +4802,7 @@ do
 							return CFrame.new(candidate, center)
 						end
 
-						skip -= 1
+						skip = skip - 1
 					end
 				end
 			end
@@ -4863,7 +4863,7 @@ do
 						statusText = string.format("Scanning %d/%d", scanIndex, #spots)
 
 						if now >= waitUntil then
-							scanIndex += 1
+							scanIndex = scanIndex + 1
 							waitUntil = now + SCAN_HOLD
 						end
 
@@ -4922,7 +4922,7 @@ do
 				local center = core or anchorSpot(target, anchor)
 
 				if not center then
-					lostClock += deltaTime
+					lostClock = lostClock + deltaTime
 
 					if lostClock >= LOST_GRACE then
 						lastSpot = root.CFrame
@@ -4953,7 +4953,7 @@ do
 					equipClock = 0
 					heldPick = equipPick()
 				else
-					equipClock += deltaTime
+					equipClock = equipClock + deltaTime
 					if equipClock >= EQUIP_STEP then
 						equipClock = 0
 						heldPick = equipPick() or heldPick
@@ -4965,14 +4965,14 @@ do
 					return
 				end
 
-				swingClock += deltaTime
+				swingClock = swingClock + deltaTime
 
 				local gap = swingGap()
 				local swung = 0
 
 				if swingClock >= gap then
 					swung = math.min(math.floor(swingClock / gap), 4)
-					swingClock -= swung * gap
+					swingClock = swingClock - swung * gap
 
 					for _ = 1, swung do
 						swing(anchor, target, center)
@@ -4986,13 +4986,13 @@ do
 						dryClock = 0
 						blindClock = 0
 					else
-						dryClock += deltaTime
-						dryRounds += swung
+						dryClock = dryClock + deltaTime
+						dryRounds = dryRounds + swung
 
 						if dryClock >= DRY_TIME or dryRounds >= DRY_ROUNDS then
 							dryClock = 0
 							dryRounds = 0
-							probeIndex += 1
+							probeIndex = probeIndex + 1
 							aimTurn = (aimTurn + 1) % #AIM_ANGLES
 							anchor = freshAnchor(target) or visibleAnchor(target) or anchor
 							spotFrame = nil
@@ -5006,7 +5006,7 @@ do
 				if sightClear(root.Position, anchor, target) then
 					blindClock = 0
 				else
-					blindClock += deltaTime
+					blindClock = blindClock + deltaTime
 
 					if blindClock >= SIGHT_GRACE then
 						blindClock = 0
@@ -5151,7 +5151,7 @@ do
 				end
 			end
 
-			labelClock += deltaTime
+			labelClock = labelClock + deltaTime
 			if labelClock >= 0.25 then
 				labelClock = 0
 				StatusLabel:SetText(statusText)
@@ -5675,7 +5675,7 @@ do
 					statusText = string.format("Loading terrain %d/%d", scanIndex, #spots)
 
 					if now >= scanUntil then
-						scanIndex += 1
+						scanIndex = scanIndex + 1
 						scanUntil = now + SCAN_HOLD
 					end
 
@@ -5727,7 +5727,7 @@ do
 				equipClock = 0
 				heldPick = Farm.equipPick()
 			else
-				equipClock += deltaTime
+				equipClock = equipClock + deltaTime
 				if equipClock >= EQUIP_STEP then
 					equipClock = 0
 					heldPick = Farm.equipPick() or heldPick
@@ -5739,7 +5739,7 @@ do
 				return
 			end
 
-			swingClock += deltaTime
+			swingClock = swingClock + deltaTime
 
 			local swingNeed = math.max(0.02, Farm.swingGap(heldPick) * 0.4)
 			local canSwing = swingClock >= swingNeed
@@ -5798,7 +5798,7 @@ do
 				requestStream(spot)
 
 				if canSwing then
-					swingClock -= swingNeed
+					swingClock = swingClock - swingNeed
 					swing(digSpot)
 				end
 
@@ -5869,7 +5869,7 @@ do
 					if not columnY or spot.Y < columnY - 0.05 then
 						columnDry = 0
 					else
-						columnDry += columnSwings
+						columnDry = columnDry + columnSwings
 					end
 
 					columnSwings = 0
@@ -5911,7 +5911,7 @@ do
 				end
 
 				if not spot then
-					barrenCycles += 1
+					barrenCycles = barrenCycles + 1
 
 					if barrenCycles >= 5 then
 						local ms = mountainSpot() or origin
@@ -5983,9 +5983,9 @@ do
 			holdAt(CFrame.new(target + Vector3.new(0, DIG_LIFT, 0), target), target)
 
 			if canSwing then
-				swingClock -= swingNeed
-				columnSwings += 1
-				targetSwings += 1
+				swingClock = swingClock - swingNeed
+				columnSwings = columnSwings + 1
+				targetSwings = targetSwings + 1
 				swing(target)
 			end
 
@@ -6079,7 +6079,7 @@ do
 				end
 			end
 
-			labelClock += deltaTime
+			labelClock = labelClock + deltaTime
 			if labelClock >= 0.25 then
 				labelClock = 0
 				StatusLabel:SetText(statusText)
@@ -6162,7 +6162,7 @@ do
 			-- Sell if above threshold OR completely full
 			if ratio >= (EXT.sellThreshold / 100) or free <= 0 then
 				if doSell() then
-					EXT.sold += 1
+					EXT.sold = EXT.sold + 1
 					return true
 				end
 			end
@@ -6392,7 +6392,7 @@ do
 						c.Parent = dot
 						dot.Parent = radarGui
 						radarDots[#radarDots + 1] = dot
-						count += 1
+						count = count + 1
 					end
 				end
 			end
@@ -6599,7 +6599,7 @@ do
 			local StatsLabel = StatsBox:AddLabel(sessionStatsText(), true)
 			local statsTimer = 0
 			local statsConn = RunService.Heartbeat:Connect(function(dt)
-				statsTimer += dt
+				statsTimer = statsTimer + dt
 				if statsTimer >= 2 then
 					statsTimer = 0
 					StatsLabel:SetText(sessionStatsText())
@@ -6616,7 +6616,7 @@ do
 			-- Auto sell: periodic check + instant when bag full
 			if EXT.autoSell then
 				local free = backpackFree()
-				EXT.sellClock += deltaTime
+				EXT.sellClock = EXT.sellClock + deltaTime
 
 				if free <= 0 then
 					-- Full bag: retry every 5s instead of every heartbeat
@@ -6633,7 +6633,7 @@ do
 
 			-- Auto upgrade
 			if EXT.autoUpgrade then
-				EXT.upgradeClock += deltaTime
+				EXT.upgradeClock = EXT.upgradeClock + deltaTime
 				if EXT.upgradeClock >= 30 then
 					EXT.upgradeClock = 0
 					tryAutoUpgrade()
@@ -6647,7 +6647,7 @@ do
 
 			-- Radar update
 			if EXT.radar then
-				EXT.radarClock += deltaTime
+				EXT.radarClock = EXT.radarClock + deltaTime
 				if EXT.radarClock >= 0.5 then
 					EXT.radarClock = 0
 					radarUpdate()
@@ -6656,11 +6656,11 @@ do
 
 			-- Macro playback
 			if EXT.macro and #EXT.macroSeq > 0 and EXT.macroIdx <= #EXT.macroSeq then
-				EXT.macroClock += deltaTime
+				EXT.macroClock = EXT.macroClock + deltaTime
 				local action = EXT.macroSeq[EXT.macroIdx]
 				if EXT.macroClock >= (action.delay or 0.5) then
 					EXT.macroClock = 0
-					EXT.macroIdx += 1
+					EXT.macroIdx = EXT.macroIdx + 1
 					if action.type == "tp" and action.pos then
 						teleportTo(action.pos)
 					elseif action.type == "sell" then
@@ -6683,7 +6683,7 @@ do
 			-- Record macro (keyboard-based, capture position)
 			if EXT.macroRecording then
 				-- Record every 0.5s the player's position for TP sequences
-				EXT.macroClock += deltaTime
+				EXT.macroClock = EXT.macroClock + deltaTime
 				if EXT.macroClock >= 1 then
 					EXT.macroClock = 0
 					local r = getRoot()
@@ -6716,7 +6716,7 @@ do
 			unfavoriteAll()
 			if resolveSell() then
 				fireRemote(resolveSell(), "all")
-				EXT.sold += 1
+				EXT.sold = EXT.sold + 1
 				return true
 			end
 			return doSell()
@@ -7272,11 +7272,11 @@ do
 			if EXT.autoTrade then tryAutoTrade() end
 			if EXT.farmSched then schedStep() end
 			if EXT.serverHud then
-				EXT.serverHudClock += dt
+				EXT.serverHudClock = EXT.serverHudClock + dt
 				if EXT.serverHudClock >= 2 then EXT.serverHudClock = 0; task.spawn(hudUpdate) end
 			end
 			if EXT.pointer then
-				EXT.boostClock += dt -- repurpose as pointer timer
+				EXT.boostClock = EXT.boostClock + dt -- repurpose as pointer timer
 				if EXT.boostClock >= 0.3 then EXT.boostClock = 0; pointerUpdate() end
 			end
 			if EXT.soundObj and not EXT.soundObj.Playing then
