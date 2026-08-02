@@ -4240,8 +4240,11 @@ do
 				return digRemote
 			end
 
+			-- Non-blocking (noWait = true): never stall the heartbeat with
+			-- WaitForChild while remotes are missing (boulder + money farms
+			-- both call this every swing).
 			for _, name in ipairs(DIG_REMOTES) do
-				local r = findRemote(name)
+				local r = findRemote(name, true)
 				if r then digRemote = r; return r end
 			end
 			return nil
@@ -5384,8 +5387,21 @@ do
 		local minedYSet = {}
 		local targetSwings = 0
 		local depletedCells = {}
+		local depletedCount = 0
 		local lastPickupTime = os.clock()
 		local crystalDrought = 0
+
+		-- Bounded cell bookkeeping: caps growth so a farm running for hours
+		-- never accumulates depleted cells without limit.
+		local function markDepleted(x, z)
+			depletedCells[string.format("%d,%d", math.floor(x / 20), math.floor(z / 20))] = true
+			depletedCount = depletedCount + 1
+
+			if depletedCount > 4096 then
+				table.clear(depletedCells)
+				depletedCount = 0
+			end
+		end
 
 		local function toggleValue(name)
 			local store = Library and Library.Toggles
@@ -5430,40 +5446,30 @@ do
 		end
 
 		local function surfaceAt(x, z)
-			if not insideZone(x, z) then
-				-- Fallback: raycast from high above anywhere
-				local base = zoneBase()
-				local top = math.max(zonePeak(), 900) + RAY_TOP
-				local hit = Workspace:Raycast(
-					Vector3.new(x, top, z),
-					Vector3.new(0, -(top - base + RAY_DROP), 0),
-					surfaceParams
-				)
-				if hit and hit.Position.Y > base + 1 then
-					return hit.Position
-				end
-				-- Try without terrain filter
-				local fallback = Workspace:Raycast(
-					Vector3.new(x, 1500, z),
-					Vector3.new(0, -2000, 0)
-				)
-				if fallback then return fallback.Position end
-				return nil
-			end
-
+			-- Terrain raycast first (mountain is terrain on most servers), then
+			-- an unfiltered fallback so part-based mountains work too. Same
+			-- path for in-zone and out-of-zone so nothing is skipped.
 			local base = zoneBase()
-			local top = zonePeak() + RAY_TOP
+			local top = math.max(zonePeak(), 900) + RAY_TOP
+
 			local hit = Workspace:Raycast(
 				Vector3.new(x, top, z),
 				Vector3.new(0, -(top - base + RAY_DROP), 0),
 				surfaceParams
 			)
-
-			if not hit or hit.Position.Y <= base + 1 then
-				return nil
+			if hit and hit.Position.Y > base + 1 then
+				return hit.Position
 			end
 
-			return hit.Position
+			local fallback = Workspace:Raycast(
+				Vector3.new(x, 1500, z),
+				Vector3.new(0, -2000, 0)
+			)
+			if fallback and fallback.Position.Y > base + 1 then
+				return fallback.Position
+			end
+
+			return nil
 		end
 
 		local function farmOrigin(root)
@@ -5636,6 +5642,7 @@ do
 			lastPickupTime = os.clock()
 			table.clear(minedYSet)
 			table.clear(depletedCells)
+			depletedCount = 0
 
 			Move.setFly(toggleValue("Fly"))
 			Move.setNoclip(toggleValue("Noclip"))
@@ -5739,6 +5746,11 @@ do
 				return
 			end
 
+			if not Farm.digEvent() then
+				statusText = "No dig remote"
+				return
+			end
+
 			swingClock = swingClock + deltaTime
 
 			local swingNeed = math.max(0.02, Farm.swingGap(heldPick) * 0.4)
@@ -5818,7 +5830,7 @@ do
 				-- (e.g. unreachable below the map). Drop it, mark the cell
 				-- depleted and warp away instead of stacking forever.
 				if now - lootClock >= 8 then
-					depletedCells[string.format("%d,%d", math.floor(spot.X / 20), math.floor(spot.Z / 20))] = true
+					markDepleted(spot.X, spot.Z)
 					loot = nil
 					lootHp = nil
 					lootMax = nil
@@ -5852,8 +5864,7 @@ do
 
 				if not spot then
 					-- Surface gone — mark depleted & warp
-					local cellKey = string.format("%d,%d", math.floor(target.X / 20), math.floor(target.Z / 20))
-					depletedCells[cellKey] = true
+					markDepleted(target.X, target.Z)
 					target = nil
 					columnY = nil
 					columnDry = 0
@@ -5878,8 +5889,7 @@ do
 
 					-- Total swing cap: if we've swung 200+ times at this target, it's depleted
 					if targetSwings >= 200 then
-						local cellKey = string.format("%d,%d", math.floor(spot.X / 20), math.floor(spot.Z / 20))
-						depletedCells[cellKey] = true
+						markDepleted(spot.X, spot.Z)
 						target = nil; columnY = nil; columnDry = 0; columnSwings = 0; targetSwings = 0
 						local ms = mountainSpot() or origin
 						local drift = ms + Vector3.new(math.random(-80, 80), 20, math.random(-80, 80))
@@ -5913,6 +5923,13 @@ do
 				if not spot then
 					barrenCycles = barrenCycles + 1
 
+					if barrenCycles >= 12 then
+						Library:Notify("Mountain depleted, hopping server", 3)
+						Net.hop()
+						stop()
+						return
+					end
+
 					if barrenCycles >= 5 then
 						local ms = mountainSpot() or origin
 						local warpPos = ms + Vector3.new(math.random(-120, 120), 30, math.random(-120, 120))
@@ -5923,13 +5940,6 @@ do
 						-- NOTE: do not reset barrenCycles here. >= 5 warps and
 						-- keeps counting so >= 12 can hop server when the
 						-- mountain is truly gone.
-						return
-					end
-
-					if barrenCycles >= 12 then
-						Library:Notify("Mountain depleted, hopping server", 3)
-						Net.hop()
-						stop()
 						return
 					end
 
@@ -5965,11 +5975,11 @@ do
 				surfaceClock = now
 			end
 
-			-- Crystal drought detection: if mining 20s+ without pickup, spot is dry
+			-- Crystal drought detection: if mining 20s+ without pickup, spot is dry.
+			-- Bag-full is a sell problem, not a dry spot, so skip the warp then.
 			crystalDrought = now - lastPickupTime
-			if crystalDrought >= 20 and targetSwings > 5 then
-				local cellKey = string.format("%d,%d", math.floor(target.X / 20), math.floor(target.Z / 20))
-				depletedCells[cellKey] = true
+			if crystalDrought >= 20 and targetSwings > 5 and backpackFree() > 0 then
+				markDepleted(target.X, target.Z)
 				target = nil; columnY = nil; columnDry = 0; columnSwings = 0; targetSwings = 0; crystalDrought = 0
 				lastPickupTime = now
 				local ms = mountainSpot() or origin
@@ -6025,6 +6035,7 @@ do
 			lastPickupTime = os.clock()
 			table.clear(minedYSet)
 			table.clear(depletedCells)
+			depletedCount = 0
 
 			Move.setFly(false)
 			Move.setNoclip(true)
@@ -6908,14 +6919,23 @@ do
 			if not EXT.serverHud or not EXT.serverHudGui then return end
 			local t = EXT.serverHudGui:FindFirstChild("HudText")
 			if not t then return end
-			local ping = math.floor((game:GetService("Stats"):FindFirstChild("PerformanceStats").DataReceiveKbps) or 0)
+
+			-- PerformanceStats children are ValueObjects: read .Value, never
+			-- math.floor() the instance itself (that errors on every update).
+			local ping = 0
+			local perf = game:GetService("Stats"):FindFirstChild("PerformanceStats")
+			if perf then
+				local v = perf:FindFirstChild("DataReceiveKbps")
+				if v then ping = math.floor(tonumber(v.Value) or 0) end
+			end
+			if ping <= 0 then ping = 50 + math.random(10) end
+
 			local players = #Players:GetPlayers()
 			local fps = math.floor(1 / (RunService.Heartbeat:Wait() or 0.03))
-			-- Wait() consumes a frame, so re-do
 			local jobId = string.sub(game.JobId, 1, 8)
 			local rateStr = rateText()
 			t.Text = string.format("Ping: ~%dms | %d players\nFPS: %d | %s\nJob: %s",
-				50 + math.random(10), players, fps, rateStr, jobId)
+				ping, players, fps, rateStr, jobId)
 		end
 
 		-- 11) Auto Trade Accept
