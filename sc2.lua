@@ -2446,6 +2446,13 @@ local function resolveSell()
 end
 
 local function doSell()
+	-- Guard on the load-time cached remotes only. Fresh resolveSell() /
+	-- resolveHome() lookups can block on WaitForChild for seconds when
+	-- remotes are missing, which would freeze the heartbeat handler.
+	if not (SellRequest and SellRequest.Parent) and not (GoHome and GoHome.Parent) then
+		return false
+	end
+
 	local now = os.clock()
 	if now - sellClock < 1.5 then
 		return false
@@ -5638,6 +5645,10 @@ do
 
 				if doSell() then
 					lootBlocked = false
+					-- Stop gliding so the character stays put during the
+					-- sell wait instead of drifting; applyPivot returns to
+					-- the exact farm spot afterwards.
+					Move.glideStop()
 					sellUntil = now + SELL_WAIT
 					statusText = "Selling"
 					return
@@ -6541,14 +6552,18 @@ do
 			-- Auto sell: periodic check + instant when bag full
 			if EXT.autoSell then
 				local free = backpackFree()
+				EXT.sellClock += deltaTime
+
 				if free <= 0 then
-					tryAutoSell()
-				else
-					EXT.sellClock += deltaTime
-					if EXT.sellClock >= EXT.sellInterval then
+					-- Full bag: retry every 5s instead of every heartbeat
+					-- (the doSell gate alone would spam ~1 sell/1.5s).
+					if EXT.sellClock >= 5 then
 						EXT.sellClock = 0
 						tryAutoSell()
 					end
+				elseif EXT.sellClock >= EXT.sellInterval then
+					EXT.sellClock = 0
+					tryAutoSell()
 				end
 			end
 
