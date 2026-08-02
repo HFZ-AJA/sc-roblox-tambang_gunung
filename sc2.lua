@@ -368,6 +368,7 @@ local EXT = {
 	farmSched = false, schedDuration = 3600, schedPause = 300, schedPhase = "idle", schedTimer = 0,
 	autoBoost = false, boostClock = 0,
 	autoTrade = false, graphData = {}, updateCheck = false,
+	autoFavorite = false, favoriteMinLuck = 1, favoritePending = {},
 }
 
 local statsAccumulator = 0
@@ -1931,6 +1932,12 @@ local function grabCrystal(inst, prompt)
 					(mutation ~= "" and (" | Mutation: " .. mutation) or ""))
 				EXT.webhookSend(title, desc, 0x00FF00)
 			end
+		end
+
+		-- Auto favorite: enqueue high-luck crystals so the backpack scan
+		-- favorites them once they land in the inventory.
+		if EXT.autoFavorite and EXT.favoriteEnqueue then
+			pcall(EXT.favoriteEnqueue, inst)
 		end
 	end
 
@@ -6468,6 +6475,68 @@ do
 			return best, bestDist
 		end
 
+		-- Auto Favorite: enqueue grabbed crystals whose luck >= threshold,
+		-- then favorite the matching Tools once they land in the backpack.
+		local function favoriteSignature(inst)
+			return table.concat({
+				tostring(getAttr(inst, "CrystalName")),
+				tostring(getAttr(inst, "Value")),
+				tostring(getAttr(inst, "WeightKg")),
+				tostring(getAttr(inst, "Mutation")),
+				tostring(getAttr(inst, "ExtraMutations")),
+			}, "|")
+		end
+
+		function EXT.favoriteEnqueue(inst)
+			if not EXT.autoFavorite then return end
+
+			local ok, luck = pcall(crystalLuck, inst)
+			if not ok or type(luck) ~= "number" or luck < EXT.favoriteMinLuck then
+				return
+			end
+
+			local sig = favoriteSignature(inst)
+			if getAttr(inst, "Value") == nil or sig == "" then
+				return
+			end
+
+			EXT.favoritePending[sig] = os.clock() + 4
+		end
+
+		local favoriteClock = 0
+		local function favoriteStep(dt)
+			if not EXT.autoFavorite or not next(EXT.favoritePending) then return end
+
+			favoriteClock = favoriteClock + dt
+			if favoriteClock < 0.5 then return end
+			favoriteClock = 0
+
+			local now = os.clock()
+			for sig, expiry in pairs(EXT.favoritePending) do
+				if now > expiry then EXT.favoritePending[sig] = nil end
+			end
+			if not next(EXT.favoritePending) then return end
+
+			local function scan(container)
+				if not container then return end
+
+				for _, tool in ipairs(container:GetChildren()) do
+					if tool:IsA("Tool") and getAttr(tool, "Favorited") ~= true then
+						local sig = favoriteSignature(tool)
+						if EXT.favoritePending[sig] then
+							pcall(function()
+								tool:SetAttribute("Favorited", true)
+							end)
+							fireRemote(ToggleFavorite, tool, true)
+						end
+					end
+				end
+			end
+
+			scan(LocalPlayer:FindFirstChildOfClass("Backpack"))
+			scan(LocalPlayer.Character)
+		end
+
 		-- === GUI ===
 		-- Auto Sell (in Farming tab)
 		local function doGui()
@@ -7149,6 +7218,23 @@ do
 		})
 		rpBox:AddLabel("Automatically finds runes in your backpack and plants them at the rune altar.", true)
 
+		-- Auto Favorite (Farming tab)
+		local favBox = Tabs.farming:AddRightGroupbox("Auto Favorite", "star")
+		favBox:AddToggle("ExtAutoFavorite", {
+			Text = "Auto Favorite High-Luck Crystals",
+			Default = false,
+			Callback = function(v)
+				EXT.autoFavorite = v
+				if not v then table.clear(EXT.favoritePending) end
+			end,
+		})
+		favBox:AddSlider("ExtFavoriteMinLuck", {
+			Text = "Min Luck %",
+			Default = 100, Min = 0, Max = 1000, Rounding = 0, Suffix = "%",
+			Callback = function(v) EXT.favoriteMinLuck = v / 100 end,
+		})
+		favBox:AddLabel("Crystals with luck >= threshold get favorited automatically on pickup", true)
+
 		pcall(v2Gui)
 
 		-- ===== AUTO PLANT RUNES =====
@@ -7286,6 +7372,7 @@ do
 
 		-- ===== V2 Heartbeat =====
 		local v2Conn = RunService.Heartbeat:Connect(function(dt)
+			if EXT.autoFavorite then pcall(favoriteStep, dt) end
 			if EXT.autoRunes then tryPlantRunes() end
 			if EXT.autoBoost then tryAutoBoost() end
 			if EXT.rebirth then tryAutoRebirth() end
@@ -7464,6 +7551,8 @@ Library:OnUnload(function()
 		EXT.macro = false
 		EXT.macroRecording = false
 		EXT.radar = false
+		EXT.autoFavorite = false
+		EXT.favoritePending = {}
 		if radarGui then radarGui:Destroy(); radarGui = nil end
 	end
 	setSpeedBoost(false)
