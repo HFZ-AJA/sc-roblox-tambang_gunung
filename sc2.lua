@@ -5270,6 +5270,13 @@ do
 		local COLLECT_LIFT = 5
 		local COLLECT_GAP = 0.15
 		local GRAB_GAP = 0.05
+		-- Scavenge: hop to a fresh mountain area when nothing was picked up
+		-- for this long, so dropped crystals from other players get streamed
+		-- in and collected instead of tunneling one column forever.
+		local SCAVENGE_GAP = 8
+		local SCAVENGE_SPREAD = 300
+		-- Loot farther than this gets teleported to, not glided to.
+		local LOOT_TP_DIST = 500
 
 		local OFFSETS = { Vector2.new(0, 0) }
 		local PEAK_OFFSETS = { Vector2.new(0, 0) }
@@ -5397,6 +5404,7 @@ do
 		local depletedCount = 0
 		local lastPickupTime = os.clock()
 		local crystalDrought = 0
+		local scavengeClock = 0
 
 		-- Bounded cell bookkeeping: caps growth so a farm running for hours
 		-- never accumulates depleted cells without limit.
@@ -5646,6 +5654,7 @@ do
 			barrenCycles = 0
 			targetSwings = 0
 			crystalDrought = 0
+			scavengeClock = 0
 			lastPickupTime = os.clock()
 			table.clear(minedYSet)
 			table.clear(depletedCells)
@@ -5735,6 +5744,7 @@ do
 
 			if pickupStep() then
 				lastPickupTime = now
+				scavengeClock = 0
 			end
 
 			if heldPick == nil or heldPick.Parent ~= LocalPlayer.Character then
@@ -5792,6 +5802,20 @@ do
 
 			if loot then
 				local spot = loot.Position
+				local distance = (spot - root.Position).Magnitude
+
+				-- Far crystal: teleport next to it instead of slow-gliding.
+				-- Without this the 8s stuck guard fires mid-flight and the
+				-- crystal gets abandoned, so the farm ends up digging instead
+				-- of collecting crystals that already exist. Restarting the
+				-- guard here means it only counts time spent near the loot.
+				if distance > LOOT_TP_DIST then
+					lootClock = now
+					requestStream(spot)
+					teleportTo(loot)
+					statusText = "Teleporting to crystal"
+					return
+				end
 
 				holdAt(CFrame.new(spot + Vector3.new(0, COLLECT_LIFT, 0), spot), spot)
 
@@ -5826,6 +5850,7 @@ do
 					if grabCrystal(loot, crystalPrompt(loot)) then
 						lastPickupTime = now
 						crystalDrought = 0
+						scavengeClock = 0
 						-- Restart the stuck timer: progress was made, so the
 						-- 8s guard should count from this grab, not the find.
 						lootClock = now
@@ -5997,6 +6022,23 @@ do
 				return
 			end
 
+			-- Scavenge pass: without a pickup for SCAVENGE_GAP seconds, hop to
+			-- a fresh spot around the mountain instead of tunneling one column.
+			-- That streams in and triggers crystals other players dropped, so
+			-- the farm collects what already exists instead of only digging.
+			-- Reset on any pickup, so a productive area is never interrupted.
+			scavengeClock = scavengeClock + deltaTime
+			if scavengeClock >= SCAVENGE_GAP then
+				scavengeClock = 0
+				local ms = mountainSpot() or origin
+				local drift = ms + Vector3.new(math.random(-SCAVENGE_SPREAD, SCAVENGE_SPREAD), 20, math.random(-SCAVENGE_SPREAD, SCAVENGE_SPREAD))
+				teleportTo(drift)
+				requestStream(drift)
+				statusText = "Scavenging crystals..."
+				task.wait(0.5)
+				return
+			end
+
 			holdAt(CFrame.new(target + Vector3.new(0, DIG_LIFT, 0), target), target)
 
 			if canSwing then
@@ -6039,6 +6081,7 @@ do
 			barrenCycles = 0
 			targetSwings = 0
 			crystalDrought = 0
+			scavengeClock = 0
 			lastPickupTime = os.clock()
 			table.clear(minedYSet)
 			table.clear(depletedCells)
