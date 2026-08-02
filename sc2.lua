@@ -1624,12 +1624,58 @@ end)
 local pickupFound = {}
 local pickupSeen = {}
 
+-- Shared pickup gate: single filter source for AutoPickup, Instant Grab
+-- and Money Farm, so the Pickup menu stays in sync with farming.
+-- Returns true, or false with a reason ("weight" = bag can't fit it).
+local function pickGate(inst, value, free)
+	if not inst.Parent or not isCrystal(inst) or getAttr(inst, "Collected") == true then
+		return false
+	end
+
+	local now = os.clock()
+	local claim = claimed[inst]
+	if claim and now - claim < PICK.retry then
+		return false
+	end
+
+	if PICK.pickupFilter and value < PICK.pickupMin then
+		return false
+	end
+
+	-- Unbroken crystals (MinedHP > 0) need the One Hit breaker first;
+	-- without it the grab just fails, so skip them instead of spamming.
+	if not oneHit and tonumber(getAttr(inst, "MinedHP") or 0) > 0 then
+		return false
+	end
+
+	local weight = crystalWeight(inst)
+	if weight > free then
+		return false, "weight"
+	end
+
+	-- Ratio filter
+	if EXT.ratioFilter and weight > 0 and (value / weight) < EXT.minRatio then
+		return false, "ratio"
+	end
+
+	-- Mutation blacklist
+	if EXT.mutIsBlacklisted and EXT.mutIsBlacklisted(inst) then
+		return false, "mut"
+	end
+
+	-- Name filter
+	if EXT.nameFiltered and EXT.nameFiltered(inst) then
+		return false, "name"
+	end
+
+	return true
+end
+
 local function pickupCandidates(free, origin)
 	local found = pickupFound
 	local seen = pickupSeen
 	table.clear(found)
 	table.clear(seen)
-	local now = os.clock()
 
 	local function consider(child)
 		if not child or seen[child] then
@@ -1637,40 +1683,14 @@ local function pickupCandidates(free, origin)
 		end
 		seen[child] = true
 
-		if not child.Parent or not isCrystal(child) or getAttr(child, "Collected") == true then
-			return
-		end
-
-		local claim = claimed[child]
-		if claim and now - claim < PICK.retry then
-			return
-		end
-
 		local value = crystalValue(child)
-		if PICK.pickupFilter and value < PICK.pickupMin then
-			return
-		end
 
-		-- Unbroken crystals (MinedHP > 0) need the One Hit breaker first;
-		-- without it the grab just fails, so skip them instead of spamming.
-		if not oneHit and tonumber(getAttr(child, "MinedHP") or 0) > 0 then
+		local ok = pickGate(child, value, free)
+		if not ok then
 			return
 		end
 
 		local weight = crystalWeight(child)
-		if weight > free then
-			return
-		end
-
-		-- Ratio filter
-		if EXT.ratioFilter and weight > 0 and (value / weight) < EXT.minRatio then
-			return
-		end
-
-		-- Mutation blacklist
-		if EXT.mutIsBlacklisted and EXT.mutIsBlacklisted(child) then
-			return
-		end
 
 		local distance = surfaceDistance(child, origin)
 		if distance > PICK.range then
@@ -5273,6 +5293,10 @@ do
 		local lastPickupTime = os.clock()
 		local crystalDrought = 0
 
+		-- Pre-farm Pickup menu state, restored on stop so toggles stay honest
+		local startAutoPickup = false
+		local startAutoRune = false
+
 		local function toggleValue(name)
 			local store = Library and Library.Toggles
 			local entry = store and store[name]
@@ -5444,15 +5468,6 @@ do
 				end
 				seen[inst] = true
 
-				if not inst.Parent or not isCrystal(inst) or getAttr(inst, "Collected") == true then
-					return
-				end
-
-				local value = crystalValue(inst)
-				if not meetsFilter(inst, value) then
-					return
-				end
-
 				-- Skip cells that got stuck/depleted so the farm doesn't keep
 				-- chasing uncollectable crystals.
 				if depletedCells[string.format("%d,%d", math.floor(inst.Position.X / 20), math.floor(inst.Position.Z / 20))] then
@@ -5464,8 +5479,15 @@ do
 					return
 				end
 
-				if crystalWeight(inst) > free then
-					blocked = true
+				local value = crystalValue(inst)
+
+				-- Same gate as AutoPickup: Pickup menu filters apply to the farm.
+				local ok, reason = pickGate(inst, value, free)
+
+				if not ok then
+					if reason == "weight" then
+						blocked = true
+					end
 					return
 				end
 
@@ -5527,7 +5549,19 @@ do
 
 			Move.setFly(toggleValue("Fly"))
 			Move.setNoclip(toggleValue("Noclip"))
-			Mountain.setAutoGrab(toggleValue("AutoRunePickup"))
+
+			-- Restore Pickup menu to pre-farm state
+			local function restoreToggle(name, saved)
+				local entry = Library and Library.Toggles and Library.Toggles[name]
+				if entry and entry.SetValue then
+					entry:SetValue(saved)
+				end
+			end
+
+			restoreToggle("AutoPickup", startAutoPickup)
+			restoreToggle("AutoRunePickup", startAutoRune)
+			autoPickupActive = startAutoPickup
+			Mountain.setAutoGrab(startAutoRune)
 		end
 
 		local function step(deltaTime)
@@ -5894,6 +5928,22 @@ do
 
 			Move.setFly(false)
 			Move.setNoclip(true)
+
+			-- Sync Pickup menu: farm needs pickup + rune grab, remember prior
+			-- toggle state so stop() can restore it.
+			startAutoPickup = toggleValue("AutoPickup")
+			startAutoRune = toggleValue("AutoRunePickup")
+
+			local function forceToggle(name)
+				local entry = Library and Library.Toggles and Library.Toggles[name]
+				if entry and entry.SetValue then
+					entry:SetValue(true)
+				end
+			end
+
+			forceToggle("AutoPickup")
+			forceToggle("AutoRunePickup")
+			autoPickupActive = true
 			Mountain.setAutoGrab(true)
 		end
 
