@@ -39,7 +39,9 @@ do
 
 	silenceIdle()
 
-	afkConns[#afkConns + 1] = LocalPlayer.Idled:Connect(nudge)
+	pcall(function()
+		afkConns[#afkConns + 1] = LocalPlayer.Idled:Connect(nudge)
+	end)
 
 	task.spawn(function()
 		while afkRunning do
@@ -84,22 +86,33 @@ for _, container in ipairs({ GuiRoot, CoreGui }) do
 	end
 end
 
-local function findRemote(name)
-	local folder = ReplicatedStorage:FindFirstChild("Remotes") or ReplicatedStorage:WaitForChild("Remotes", 10)
+local function findRemote(name, noWait)
+	local folder = ReplicatedStorage:FindFirstChild("Remotes")
+	if not folder and not noWait then
+		folder = ReplicatedStorage:WaitForChild("Remotes", 10)
+	end
 	if not folder then
 		return nil
 	end
-	return folder:FindFirstChild(name) or folder:WaitForChild(name, 5)
+
+	local remote = folder:FindFirstChild(name)
+	if remote or noWait then
+		return remote
+	end
+	return folder:WaitForChild(name, 5)
 end
 
-local SellRequest = findRemote("SellRequest")
-if not SellRequest then SellRequest = findRemote("SellAll") end
-if not SellRequest then SellRequest = findRemote("Sell") end
-local GoHome = findRemote("GoHome")
-if not GoHome then GoHome = findRemote("TeleportHome") end
-if not GoHome then GoHome = findRemote("Home") end
-local HoldComplete = findRemote("CrystalHoldComplete")
-local ToggleFavorite = findRemote("ToggleFavorite")
+-- Load-time lookups are non-blocking (noWait = true): Remotes may not
+-- exist yet when the script boots. Lazily resolved with WaitForChild by
+-- resolveHome/resolveSell at runtime when the user actually acts.
+local SellRequest = findRemote("SellRequest", true)
+if not SellRequest then SellRequest = findRemote("SellAll", true) end
+if not SellRequest then SellRequest = findRemote("Sell", true) end
+local GoHome = findRemote("GoHome", true)
+if not GoHome then GoHome = findRemote("TeleportHome", true) end
+if not GoHome then GoHome = findRemote("Home", true) end
+local HoldComplete = findRemote("CrystalHoldComplete", true)
+local ToggleFavorite = findRemote("ToggleFavorite", true)
 
 local ESP = {
 	font = Enum.Font.GothamBold,
@@ -230,9 +243,55 @@ local PARSE_MULTIPLIERS = { k = 1e3, m = 1e6, b = 1e9, t = 1e12, qa = 1e15 }
 local CONTAINER_NAMES = { "DroppedCrystals", "Crystals" }
 
 local repo = "https://raw.githubusercontent.com/deividcomsono/Obsidian/main/"
-local Library = loadstring(game:HttpGet(repo .. "Library.lua"))()
-local SaveManager = loadstring(game:HttpGet(repo .. "addons/SaveManager.lua"))()
-local ThemeManager = loadstring(game:HttpGet(repo .. "addons/ThemeManager.lua"))()
+
+print("[Mine a Mountain] sc.lua booting...")
+
+-- Globals (not locals): the main chunk sits right at Luau's 200-register
+-- limit, extra locals tip it over (CompileError).
+function fetchRemoteSource(url)
+	local ok, body = pcall(function()
+		return game:HttpGet(url)
+	end)
+
+	if ok and type(body) == "string" and body ~= "" then
+		return body
+	end
+
+	-- Fallback for executors that block HttpGet but allow request()
+	local sender = (syn and syn.request) or (http and http.request) or http_request or request
+
+	if type(sender) == "function" then
+		local rok, res = pcall(function()
+			return sender({ Url = url, Method = "GET" })
+		end)
+
+		if rok and type(res) == "table" and type(res.Body) == "string" and res.Body ~= "" then
+			return res.Body
+		end
+	end
+
+	return nil
+end
+
+function loadRemoteLibrary(url, label)
+	local src = fetchRemoteSource(url)
+
+	if not src then
+		error("[Mine a Mountain] Gagal download " .. label .. " - jaringan/HttpGet diblokir?")
+	end
+
+	local fn, err = loadstring(src)
+
+	if not fn then
+		error("[Mine a Mountain] Gagal compile " .. label .. ": " .. tostring(err))
+	end
+
+	return fn()
+end
+
+local Library = loadRemoteLibrary(repo .. "Library.lua", "Library.lua")
+local SaveManager = loadRemoteLibrary(repo .. "addons/SaveManager.lua", "SaveManager.lua")
+local ThemeManager = loadRemoteLibrary(repo .. "addons/ThemeManager.lua", "ThemeManager.lua")
 
 Library.ForceCheckbox = false
 Library.ShowToggleFrameInKeybinds = true
@@ -2450,7 +2509,12 @@ local function doSell()
 	-- resolveHome() lookups can block on WaitForChild for seconds when
 	-- remotes are missing, which would freeze the heartbeat handler.
 	if not (SellRequest and SellRequest.Parent) and not (GoHome and GoHome.Parent) then
-		return false
+		-- Non-blocking refresh (no WaitForChild in a heartbeat handler).
+		SellRequest = findRemote("SellRequest", true) or findRemote("SellAll", true) or findRemote("Sell", true)
+		GoHome = findRemote("GoHome", true) or findRemote("TeleportHome", true) or findRemote("Home", true)
+		if not (SellRequest and SellRequest.Parent) and not (GoHome and GoHome.Parent) then
+			return false
+		end
 	end
 
 	local now = os.clock()
