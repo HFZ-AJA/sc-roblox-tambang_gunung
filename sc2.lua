@@ -177,8 +177,9 @@ local PICK = {
 	instantTick = 0.25,
 	oneHitBurst = 150,
 	-- Min interval between burstBreak volleys (150 dig remotes each).
-	-- Prevents ~9000 remote calls/sec spam while breaking crystals.
-	breakGap = 0.35,
+	-- Kept tight so crystals break fast: 0.15s ≈ 1000 remotes/sec only
+	-- while breaking, still far below the ~9000/sec unthrottled spam.
+	breakGap = 0.15,
 	breakClock = 0,
 	pickupMin = 0,
 	pickupFilter = false,
@@ -1842,7 +1843,7 @@ function burstBreak(inst)
 
 	local event
 	for _, name in ipairs(DIG_NAMES) do
-		local r = findRemote(name)
+		local r = findRemote(name, true)
 		if r then
 			event = r
 			break
@@ -5847,17 +5848,24 @@ do
 				holdAt(CFrame.new(spot + Vector3.new(0, COLLECT_LIFT, 0), spot), spot)
 
 				local digSpot = spot
+				local breaking = lootHp and lootHp > 0
+				local buried = false
 
 				-- Crystals below the character (in holes) must be burst-broken
 				-- at their own position. aimPoint would raycast into the
 				-- ceiling above them, so the farm would never break them and
 				-- would get stuck on this loot forever. burstBreak throttles
 				-- itself (PICK.breakGap), so this is safe every frame.
-				if lootHp and lootHp > 0 then
+				if breaking then
 					burstBreak(loot)
-				end
 
-				if not lootHp or lootHp <= 0 then
+					-- Detect hole crystals so the swing below is skipped for
+					-- them (it would hit the ceiling — wasted, conflicting
+					-- dig traffic). Surface crystals still get swing + burst
+					-- damage for the fastest possible break.
+					local ground = surfaceAt(spot.X, spot.Z)
+					buried = ground ~= nil and spot.Y < ground.Y - 1
+				else
 					local ground = surfaceAt(spot.X, spot.Z)
 
 					if ground then
@@ -5867,7 +5875,7 @@ do
 
 				requestStream(spot)
 
-				if canSwing then
+				if canSwing and not buried then
 					swingClock = swingClock - swingNeed
 					swing(digSpot)
 				end
