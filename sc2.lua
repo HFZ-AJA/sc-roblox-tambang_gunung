@@ -379,7 +379,6 @@ local lastBagWarn = 0
 local instantPromptActive = false
 local instantPatched = {}
 local instantAccumulator = math.huge
-local instantBagWarn = 0
 
 local function reportError(context, err)
 	local now = os.clock()
@@ -2050,8 +2049,9 @@ local function instantGrab()
 
 	local free = backpackFree()
 	if free <= 0 then
-		if os.clock() - instantBagWarn >= 8 then
-			instantBagWarn = os.clock()
+		-- Shared rate limit with AutoPickup's full-bag notice.
+		if os.clock() - lastBagWarn >= 8 then
+			lastBagWarn = os.clock()
 			Library:Notify("Backpack full", 2)
 		end
 		return
@@ -5296,13 +5296,12 @@ do
 		local COLLECT_LIFT = 5
 		local COLLECT_GAP = 0.15
 		local GRAB_GAP = 0.05
-		-- Scavenge: hop to a fresh mountain area when nothing was picked up
-		-- for this long, so dropped crystals from other players get streamed
-		-- in and collected instead of tunneling one column forever.
-		local SCAVENGE_GAP = 8
-		local SCAVENGE_SPREAD = 300
-		-- Loot farther than this gets teleported to, not glided to.
-		local LOOT_TP_DIST = 500
+		-- Scavenge + loot-teleport tuning. Stored as table fields (not
+		-- install-scope locals): Money install() sits at Luau's 200-register
+		-- limit and extra locals tip it over (CompileError).
+		PICK.scavengeGap = 8
+		PICK.scavengeSpread = 300
+		PICK.lootTpDist = 500
 
 		local OFFSETS = { Vector2.new(0, 0) }
 		local PEAK_OFFSETS = { Vector2.new(0, 0) }
@@ -5427,20 +5426,22 @@ do
 		local minedYSet = {}
 		local targetSwings = 0
 		local depletedCells = {}
-		local depletedCount = 0
 		local lastPickupTime = os.clock()
 		local crystalDrought = 0
-		local scavengeClock = 0
+
+		Money.depletedCount = 0
 
 		-- Bounded cell bookkeeping: caps growth so a farm running for hours
-		-- never accumulates depleted cells without limit.
-		local function markDepleted(x, z)
+		-- never accumulates depleted cells without limit. Global (not a
+		-- local) like burstBreak: Money install() sits at Luau's 200-register
+		-- limit and extra locals tip it over (CompileError).
+		function markDepleted(x, z)
 			depletedCells[string.format("%d,%d", math.floor(x / 20), math.floor(z / 20))] = true
-			depletedCount = depletedCount + 1
+			Money.depletedCount = Money.depletedCount + 1
 
-			if depletedCount > 4096 then
+			if Money.depletedCount > 4096 then
 				table.clear(depletedCells)
-				depletedCount = 0
+				Money.depletedCount = 0
 			end
 		end
 
@@ -5680,11 +5681,11 @@ do
 			barrenCycles = 0
 			targetSwings = 0
 			crystalDrought = 0
-			scavengeClock = 0
+			Money.scavengeClock = 0
 			lastPickupTime = os.clock()
 			table.clear(minedYSet)
 			table.clear(depletedCells)
-			depletedCount = 0
+			Money.depletedCount = 0
 
 			Move.setFly(toggleValue("Fly"))
 			Move.setNoclip(toggleValue("Noclip"))
@@ -5770,7 +5771,7 @@ do
 
 			if pickupStep() then
 				lastPickupTime = now
-				scavengeClock = 0
+				Money.scavengeClock = 0
 			end
 
 			if heldPick == nil or heldPick.Parent ~= LocalPlayer.Character then
@@ -5835,7 +5836,7 @@ do
 				-- crystal gets abandoned, so the farm ends up digging instead
 				-- of collecting crystals that already exist. Restarting the
 				-- guard here means it only counts time spent near the loot.
-				if distance > LOOT_TP_DIST then
+				if distance > PICK.lootTpDist then
 					lootClock = now
 					requestStream(spot)
 					teleportTo(loot)
@@ -5876,7 +5877,7 @@ do
 					if grabCrystal(loot, crystalPrompt(loot)) then
 						lastPickupTime = now
 						crystalDrought = 0
-						scavengeClock = 0
+						Money.scavengeClock = 0
 						-- Restart the stuck timer: progress was made, so the
 						-- 8s guard should count from this grab, not the find.
 						lootClock = now
@@ -6048,16 +6049,16 @@ do
 				return
 			end
 
-			-- Scavenge pass: without a pickup for SCAVENGE_GAP seconds, hop to
+			-- Scavenge pass: without a pickup for PICK.scavengeGap seconds, hop to
 			-- a fresh spot around the mountain instead of tunneling one column.
 			-- That streams in and triggers crystals other players dropped, so
 			-- the farm collects what already exists instead of only digging.
 			-- Reset on any pickup, so a productive area is never interrupted.
-			scavengeClock = scavengeClock + deltaTime
-			if scavengeClock >= SCAVENGE_GAP then
-				scavengeClock = 0
+			Money.scavengeClock = Money.scavengeClock + deltaTime
+			if Money.scavengeClock >= PICK.scavengeGap then
+				Money.scavengeClock = 0
 				local ms = mountainSpot() or origin
-				local drift = ms + Vector3.new(math.random(-SCAVENGE_SPREAD, SCAVENGE_SPREAD), 20, math.random(-SCAVENGE_SPREAD, SCAVENGE_SPREAD))
+				local drift = ms + Vector3.new(math.random(-PICK.scavengeSpread, PICK.scavengeSpread), 20, math.random(-PICK.scavengeSpread, PICK.scavengeSpread))
 				teleportTo(drift)
 				requestStream(drift)
 				statusText = "Scavenging crystals..."
@@ -6107,11 +6108,11 @@ do
 			barrenCycles = 0
 			targetSwings = 0
 			crystalDrought = 0
-			scavengeClock = 0
+			Money.scavengeClock = 0
 			lastPickupTime = os.clock()
 			table.clear(minedYSet)
 			table.clear(depletedCells)
-			depletedCount = 0
+			Money.depletedCount = 0
 
 			Move.setFly(false)
 			Move.setNoclip(true)
@@ -6561,7 +6562,10 @@ do
 
 		-- Auto Favorite: enqueue grabbed crystals whose luck >= threshold,
 		-- then favorite the matching Tools once they land in the backpack.
-		local function favoriteSignature(inst)
+		-- Globals (not locals) + EXT-field clock: the EXT install body and
+		-- main chunk both sit near Luau's 200-register limit, and extra
+		-- locals tip them over (CompileError).
+		function favoriteSignature(inst)
 			return table.concat({
 				tostring(getAttr(inst, "CrystalName")),
 				tostring(getAttr(inst, "Value")),
@@ -6587,13 +6591,13 @@ do
 			EXT.favoritePending[sig] = os.clock() + 4
 		end
 
-		local favoriteClock = 0
-		local function favoriteStep(dt)
+		EXT.favoriteClock = 0
+		function favoriteStep(dt)
 			if not EXT.autoFavorite or not next(EXT.favoritePending) then return end
 
-			favoriteClock = favoriteClock + dt
-			if favoriteClock < 0.5 then return end
-			favoriteClock = 0
+			EXT.favoriteClock = EXT.favoriteClock + dt
+			if EXT.favoriteClock < 0.5 then return end
+			EXT.favoriteClock = 0
 
 			local now = os.clock()
 			for sig, expiry in pairs(EXT.favoritePending) do
@@ -7302,22 +7306,25 @@ do
 		})
 		rpBox:AddLabel("Automatically finds runes in your backpack and plants them at the rune altar.", true)
 
-		-- Auto Favorite (Farming tab)
-		local favBox = Tabs.farming:AddRightGroupbox("Auto Favorite", "star")
-		favBox:AddToggle("ExtAutoFavorite", {
-			Text = "Auto Favorite High-Luck Crystals",
-			Default = false,
-			Callback = function(v)
-				EXT.autoFavorite = v
-				if not v then table.clear(EXT.favoritePending) end
-			end,
-		})
-		favBox:AddSlider("ExtFavoriteMinLuck", {
-			Text = "Min Luck %",
-			Default = 100, Min = 0, Max = 1000, Rounding = 0, Suffix = "%",
-			Callback = function(v) EXT.favoriteMinLuck = v / 100 end,
-		})
-		favBox:AddLabel("Crystals with luck >= threshold get favorited automatically on pickup", true)
+		-- Auto Favorite (Farming tab). Scoped so favBox's register is
+		-- released before the install body continues.
+		do
+			local favBox = Tabs.farming:AddRightGroupbox("Auto Favorite", "star")
+			favBox:AddToggle("ExtAutoFavorite", {
+				Text = "Auto Favorite High-Luck Crystals",
+				Default = false,
+				Callback = function(v)
+					EXT.autoFavorite = v
+					if not v then table.clear(EXT.favoritePending) end
+				end,
+			})
+			favBox:AddSlider("ExtFavoriteMinLuck", {
+				Text = "Min Luck %",
+				Default = 100, Min = 0, Max = 1000, Rounding = 0, Suffix = "%",
+				Callback = function(v) EXT.favoriteMinLuck = v / 100 end,
+			})
+			favBox:AddLabel("Crystals with luck >= threshold get favorited automatically on pickup", true)
+		end
 
 		pcall(v2Gui)
 
